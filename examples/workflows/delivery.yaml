@@ -1,0 +1,57 @@
+# Software-delivery wiring.
+#
+# A linear pipeline where each loop consumes the previous one's output and owes
+# the next. The interesting dynamics are the *knock-backs*: the reviewer can
+# reject the PR (re-arming the builder), and any upstream change cascades
+# forward — a re-planned `plan` invalidates the `pr`, its `verdict`, and the
+# `merge` automatically (the forward cascade, §7). The `merge` is terminal: once
+# green it is a destructive completion and can never be re-armed (§15.2).
+#
+# Drive it (the "wiring" / worker loop):
+#   wf=$(oweflow create delivery --provide proposal='{"text":"add dark mode"}' | jq -r .workflow)
+#   oweflow tick $wf          # -> an order for `planner`
+#   oweflow green $wf <run> plan --value '{"plan":"..."}'
+#   ...                       # tick/green down the chain
+#   oweflow reject $wf pr --by reviewer --text "tests missing"   # knock-back
+#   oweflow status $wf        # debts / eligible / blocked
+
+name: delivery
+title: Software delivery
+description: Plan → build → review → merge, with reviewer knock-backs.
+
+inputs:
+  - name: proposal          # required: the workflow stays blocked until supplied
+    seedOwed: true          # `--provide proposal=...` at create, or `oweflow provide`
+
+loops:
+  - name: planner
+    consumes: [proposal]
+    produces: [plan]
+    body: |
+      Workflow ${WORKFLOW}, run ${RUN}.
+      Read the proposal and produce a concrete implementation plan as `plan`.
+
+  - name: builder
+    consumes: [plan]
+    produces: [pr]
+    maxAttempts: 5            # builders get re-armed a lot by reviewer rejects
+    body: |
+      Workflow ${WORKFLOW}, run ${RUN}.
+      Implement `plan` and open a PR. Green `pr` with the PR url.
+      If `pr` already carries reject reasons, address them and re-green.
+
+  - name: reviewer
+    consumes: [pr]
+    produces: [verdict]
+    body: |
+      Workflow ${WORKFLOW}, run ${RUN}.
+      Review `pr`. If it is not mergeable, `reject` pr with a reason (this
+      re-arms the builder). Otherwise green `verdict` with your approval.
+
+  - name: merger
+    consumes: [verdict]
+    produces: [merge]
+    terminal: true           # a merge is a destructive completion
+    body: |
+      Workflow ${WORKFLOW}, run ${RUN}.
+      The verdict is approval. Merge the PR and green `merge` (terminal).

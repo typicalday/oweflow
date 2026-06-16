@@ -1,0 +1,340 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  computeFingerprint,
+  eligibleFirings,
+  fingerprintMatches,
+  loopMode,
+  maintainDecisions,
+  members,
+  pendingOwed,
+  requiredInputs,
+  workflowStatus,
+} from '../src/model.ts';
+import { arts, def, input, loop } from './helpers.ts';
+
+// The software-delivery wiring (§9), used across several tests.
+const delivery = def(
+  'delivery',
+  [input('proposal')],
+  [
+    loop({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+    loop({ name: 'builder', consumes: ['plan'], produces: ['pr'] }),
+    loop({ name: 'reviewer', consumes: ['pr'], produces: ['verdict'] }),
+    loop({ name: 'merger', consumes: ['verdict'], produces: ['merge'] }),
+  ],
+);
+
+// The research wiring (§10/§11) with a collection.
+const research = def(
+  'research',
+  [input('question')],
+  [
+    loop({ name: 'gather', consumes: ['question'], produces: ['gather.source[]'] }),
+    loop({
+      name: 'formatcheck',
+      consumes: ['gather.source[$i]'],
+      produces: ['gather.source[$i].formatcheck'],
+    }),
+    loop({ name: 'synthesize', consumes: ['gather.source[*]'], produces: ['draft'] }),
+  ],
+);
+
+test('loopMode classifies plain / map / reduce', () => {
+  assert.equal(loopMode(delivery.loops[0]!), 'plain');
+  assert.equal(loopMode(research.loops[1]!), 'map');
+  assert.equal(loopMode(research.loops[2]!), 'reduce');
+});
+
+test('pendingOwed seeds singletons and seals, then map children when elements green', () => {
+  // delivery: every singleton output is owed from the start
+  const empty = arts([{ path: 'proposal', producer: 'human', acceptance: 'green', version: 1 }]);
+  const owed = pendingOwed(delivery, empty).map((a) => a.path).sort();
+  assert.deepEqual(owed, ['merge', 'plan', 'pr', 'verdict']);
+
+  // research: the collection producer owes its seal; map children appear only per green element
+  const r0 = arts([{ path: 'question', producer: 'human', acceptance: 'green', version: 1 }]);
+  const o0 = pendingOwed(research, r0);
+  assert.deepEqual(o0.map((a) => a.path).sort(), ['draft', 'gather.source.sealed']);
+  assert.equal(o0.find((a) => a.path === 'gather.source.sealed')?.sealOf, 'gather.source');
+
+  // once two sources are green, formatcheck owes one child per element
+  const r1 = arts([
+    { path: 'question', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'draft', producer: 'synthesize', acceptance: 'owed' },
+  ]);
+  const o1 = pendingOwed(research, r1).map((a) => a.path).sort();
+  assert.deepEqual(o1, ['gather.source[0].formatcheck', 'gather.source[1].formatcheck']);
+});
+
+test('firing rule — only the loop whose input is green and output owed fires', () => {
+  // proposal green, plan owed → only planner is eligible
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'owed' },
+    { path: 'pr', producer: 'builder', acceptance: 'owed' },
+    { path: 'verdict', producer: 'reviewer', acceptance: 'owed' },
+    { path: 'merge', producer: 'merger', acceptance: 'owed' },
+  ]);
+  const f = eligibleFirings(delivery, a);
+  assert.equal(f.length, 1);
+  assert.equal(f[0]!.loop, 'planner');
+  assert.deepEqual(f[0]!.inputs, ['proposal']);
+  assert.deepEqual(f[0]!.outputs, ['plan']);
+});
+
+test('firing rule — a green output is not re-fired', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 1 },
+    { path: 'pr', producer: 'builder', acceptance: 'owed' },
+    { path: 'verdict', producer: 'reviewer', acceptance: 'owed' },
+    { path: 'merge', producer: 'merger', acceptance: 'owed' },
+  ]);
+  const f = eligibleFirings(delivery, a);
+  assert.deepEqual(f.map((x) => x.loop), ['builder']); // planner done, builder now eligible
+});
+
+test('firing rule — re-firing: a rejected output re-arms its producer', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 1 },
+    { path: 'pr', producer: 'builder', acceptance: 'rejected', version: 1 }, // reviewer knocked it back
+    { path: 'verdict', producer: 'reviewer', acceptance: 'owed' },
+    { path: 'merge', producer: 'merger', acceptance: 'owed' },
+  ]);
+  const f = eligibleFirings(delivery, a);
+  assert.deepEqual(f.map((x) => x.loop), ['builder']);
+});
+
+test('map eligibility — one firing per green element with an owed child', () => {
+  const a = arts([
+    { path: 'question', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source[2]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source[0].formatcheck', producer: 'formatcheck', acceptance: 'green', version: 1 },
+    { path: 'gather.source[1].formatcheck', producer: 'formatcheck', acceptance: 'owed' },
+    { path: 'gather.source[2].formatcheck', producer: 'formatcheck', acceptance: 'owed' },
+    { path: 'draft', producer: 'synthesize', acceptance: 'owed' },
+  ]);
+  const f = eligibleFirings(research, a).filter((x) => x.loop === 'formatcheck');
+  assert.deepEqual(f.map((x) => x.key).sort(), ['gather.source[1]', 'gather.source[2]']);
+  assert.deepEqual(f.find((x) => x.index === 1)!.outputs, ['gather.source[1].formatcheck']);
+});
+
+test('reduce eligibility — needs seal green AND every live member green', () => {
+  const base = [
+    { path: 'question', producer: 'human', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'green' as const, version: 1 },
+    { path: 'draft', producer: 'synthesize', acceptance: 'owed' as const },
+  ];
+  // seal not green → synthesize blocked
+  let a = arts([
+    ...base,
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'owed', sealOf: 'gather.source' },
+  ]);
+  assert.equal(eligibleFirings(research, a).some((x) => x.loop === 'synthesize'), false);
+
+  // seal green, all members green → synthesize fires once over the set
+  a = arts([
+    ...base,
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+  ]);
+  const f = eligibleFirings(research, a).filter((x) => x.loop === 'synthesize');
+  assert.equal(f.length, 1);
+  assert.deepEqual(f[0]!.inputs.sort(), ['gather.source.sealed', 'gather.source[0]', 'gather.source[1]']);
+
+  // a rejected member blocks the reduce; a retracted member does not
+  a = arts([
+    ...base,
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'rejected', version: 1 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+  ]);
+  assert.equal(eligibleFirings(research, a).some((x) => x.loop === 'synthesize'), false);
+
+  a = arts([
+    ...base,
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'retracted', version: 1 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+  ]);
+  const f2 = eligibleFirings(research, a).filter((x) => x.loop === 'synthesize');
+  assert.equal(f2.length, 1);
+  assert.deepEqual(f2[0]!.inputs.sort(), ['gather.source.sealed', 'gather.source[0]']); // [1] dropped
+});
+
+test('members are returned in index order', () => {
+  const a = arts([
+    { path: 'g.s[2]', producer: 'g', acceptance: 'green', version: 1 },
+    { path: 'g.s[0]', producer: 'g', acceptance: 'green', version: 1 },
+    { path: 'g.s[10]', producer: 'g', acceptance: 'green', version: 1 },
+    { path: 'g.s[0].child', producer: 'c', acceptance: 'green', version: 1 }, // not a bare member
+  ]);
+  assert.deepEqual(members(a, 'g.s').map((m) => m.path), ['g.s[0]', 'g.s[2]', 'g.s[10]']);
+});
+
+test('requiredInputs — singleton, map child, and reduce shapes', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 3 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 1 },
+  ]);
+  assert.deepEqual(requiredInputs(delivery, a, a.get('plan')!), ['proposal']);
+
+  const r = arts([
+    { path: 'question', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'gather.source[3]', producer: 'gather', acceptance: 'green', version: 2 },
+    { path: 'gather.source[3].formatcheck', producer: 'formatcheck', acceptance: 'green', version: 1 },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+    { path: 'draft', producer: 'synthesize', acceptance: 'green', version: 1 },
+  ]);
+  assert.deepEqual(requiredInputs(research, r, r.get('gather.source[3].formatcheck')!), ['gather.source[3]']);
+  assert.deepEqual(
+    requiredInputs(research, r, r.get('draft')!).sort(),
+    ['gather.source.sealed', 'gather.source[0]', 'gather.source[3]'],
+  );
+  // a seeded input (producer is human, not a loop) rests on nothing
+  assert.deepEqual(requiredInputs(research, r, r.get('question')!), []);
+});
+
+test('fingerprint compute + match', () => {
+  const a = arts([
+    { path: 'x', producer: 'p', acceptance: 'green', version: 2 },
+    { path: 'y', producer: 'p', acceptance: 'green', version: 5 },
+  ]);
+  const fp = computeFingerprint(a, ['x', 'y']);
+  assert.deepEqual(fp, { x: 2, y: 5 });
+  assert.equal(fingerprintMatches(a, ['x', 'y'], fp), true);
+  assert.equal(fingerprintMatches(a, ['x', 'y'], { x: 2, y: 4 }), false); // version moved
+  assert.equal(fingerprintMatches(a, ['x'], fp), false); // key-set differs
+});
+
+test('forward cascade — moved input re-rejects a green output', () => {
+  // pr is green built on plan v1, but plan is now v2
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 2, fingerprint: { proposal: 1 } },
+    { path: 'pr', producer: 'builder', acceptance: 'green', version: 1, fingerprint: { plan: 1 } },
+  ]);
+  const ops = maintainDecisions(delivery, a);
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0]!.kind, 'reject');
+  assert.equal(ops[0]!.path, 'pr');
+});
+
+test('forward cascade — non-green input re-rejects the output (build dirty-bit)', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'rejected', version: 1 },
+    { path: 'pr', producer: 'builder', acceptance: 'green', version: 1, fingerprint: { plan: 1 } },
+  ]);
+  const ops = maintainDecisions(delivery, a);
+  assert.deepEqual(ops.map((o) => [o.kind, o.path]), [['reject', 'pr']]);
+});
+
+test('cascade — retracted element tombstones its map child', () => {
+  const a = arts([
+    { path: 'question', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'gather.source[3]', producer: 'gather', acceptance: 'retracted', version: 1 },
+    {
+      path: 'gather.source[3].formatcheck',
+      producer: 'formatcheck',
+      acceptance: 'green',
+      version: 1,
+      fingerprint: { 'gather.source[3]': 1 },
+    },
+  ]);
+  const ops = maintainDecisions(research, a);
+  assert.deepEqual(ops.map((o) => [o.kind, o.path]), [['retract', 'gather.source[3].formatcheck']]);
+});
+
+test('cascade — skipped input propagates skip to a plain dependent', () => {
+  const routed = def(
+    'routed',
+    [input('case')],
+    [
+      loop({ name: 'decide', consumes: ['case'], produces: ['router'] }),
+      loop({ name: 'escalate', consumes: ['router'], produces: ['escalation'] }),
+      loop({ name: 'followup', consumes: ['escalation'], produces: ['letter'] }),
+    ],
+  );
+  const a = arts([
+    { path: 'case', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'router', producer: 'decide', acceptance: 'green', version: 1, fingerprint: { case: 1 } },
+    // escalation was skipped while router was at v1; it stays skipped (no re-arm)
+    { path: 'escalation', producer: 'escalate', acceptance: 'skipped', version: 0, fingerprint: { router: 1 } },
+    {
+      path: 'letter',
+      producer: 'followup',
+      acceptance: 'green',
+      version: 1,
+      fingerprint: { escalation: 0 },
+    },
+  ]);
+  const ops = maintainDecisions(routed, a);
+  assert.deepEqual(ops.map((o) => [o.kind, o.path]), [['skip', 'letter']]);
+});
+
+test('cascade — a skipped branch re-arms when its inputs revive', () => {
+  const routed = def(
+    'routed',
+    [input('case')],
+    [
+      loop({ name: 'decide', consumes: ['case'], produces: ['router'] }),
+      loop({ name: 'escalate', consumes: ['router'], produces: ['escalation'] }),
+    ],
+  );
+  const a = arts([
+    { path: 'case', producer: 'human', acceptance: 'green', version: 1 },
+    // router has moved to v2 since escalation was skipped (fingerprinted at router v1)
+    { path: 'router', producer: 'decide', acceptance: 'green', version: 2, fingerprint: { case: 1 } },
+    { path: 'escalation', producer: 'escalate', acceptance: 'skipped', version: 0, fingerprint: { router: 1 } },
+  ]);
+  const ops = maintainDecisions(routed, a);
+  assert.deepEqual(ops.map((o) => [o.kind, o.path]), [['rearm', 'escalation']]);
+});
+
+test('cascade — a healthy graph yields no ops', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 1, fingerprint: { proposal: 1 } },
+    { path: 'pr', producer: 'builder', acceptance: 'green', version: 1, fingerprint: { plan: 1 } },
+  ]);
+  assert.deepEqual(maintainDecisions(delivery, a), []);
+});
+
+test('workflowStatus — debts, eligible, blocked, done', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 1 },
+    { path: 'pr', producer: 'builder', acceptance: 'owed' },
+    { path: 'verdict', producer: 'reviewer', acceptance: 'owed' },
+    { path: 'merge', producer: 'merger', acceptance: 'owed' },
+  ]);
+  const s = workflowStatus(delivery, a);
+  assert.equal(s.done, false);
+  assert.deepEqual(s.debts.map((d) => d.path), ['merge', 'pr', 'verdict']);
+  assert.deepEqual(s.eligible.map((e) => e.loop), ['builder']);
+  // reviewer blocked on pr, merger blocked on verdict
+  const blocked = Object.fromEntries(s.blocked.map((b) => [b.loop, b.blockedOn]));
+  assert.deepEqual(blocked['reviewer'], ['pr']);
+  assert.deepEqual(blocked['merger'], ['verdict']);
+});
+
+test('workflowStatus — done when nothing owed-and-not-green', () => {
+  const a = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'plan', producer: 'planner', acceptance: 'green', version: 1 },
+    { path: 'pr', producer: 'builder', acceptance: 'green', version: 1 },
+    { path: 'verdict', producer: 'reviewer', acceptance: 'green', version: 1 },
+    { path: 'merge', producer: 'merger', acceptance: 'green', version: 1, terminal: true },
+  ]);
+  const s = workflowStatus(delivery, a);
+  assert.equal(s.done, true);
+  assert.equal(s.debts.length, 0);
+});

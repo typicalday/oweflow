@@ -1,0 +1,424 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Engine } from '../src/engine.ts';
+import type { Order } from '../src/engine.ts';
+import { openStore } from '../src/store.ts';
+import type { Store } from '../src/store.ts';
+import type { WorkflowDef } from '../src/types.ts';
+import { def, input, loop } from './helpers.ts';
+
+// ---- fixtures & harness ------------------------------------------------------
+
+const delivery = def(
+  'delivery',
+  [input('proposal')],
+  [
+    loop({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+    loop({ name: 'builder', consumes: ['plan'], produces: ['pr'] }),
+    loop({ name: 'reviewer', consumes: ['pr'], produces: ['verdict'] }),
+    loop({ name: 'merger', consumes: ['verdict'], produces: ['merge'] }),
+  ],
+);
+
+const research = def(
+  'research',
+  [input('question')],
+  [
+    loop({ name: 'gather', consumes: ['question'], produces: ['gather.source[]'] }),
+    loop({
+      name: 'formatcheck',
+      consumes: ['gather.source[$i]'],
+      produces: ['gather.source[$i].formatcheck'],
+    }),
+    loop({ name: 'synthesize', consumes: ['gather.source[*]'], produces: ['draft'] }),
+  ],
+);
+
+function makeEngine(defs: WorkflowDef[], opts: { reapTtlMs?: number } = {}): {
+  engine: Engine;
+  store: Store;
+} {
+  const store = openStore(':memory:');
+  const byName = new Map(defs.map((d) => [d.name, d]));
+  const engine = new Engine(
+    store,
+    (name) => {
+      const d = byName.get(name);
+      if (!d) throw new Error(`no def: ${name}`);
+      return d;
+    },
+    opts,
+  );
+  return { engine, store };
+}
+
+/** Tick and return the single order for `loop`, asserting exactly one exists. */
+function fire(engine: Engine, wf: string, loopName: string, now: number): Order {
+  const t = engine.tick(wf, { now });
+  const matching = t.orders.filter((o) => o.loop === loopName);
+  assert.equal(
+    matching.length,
+    1,
+    `expected exactly one ${loopName} order at t=${now}, got [${t.orders.map((o) => o.loop)}]`,
+  );
+  return matching[0]!;
+}
+
+/** Drive a plain loop's order to green and close it. */
+function complete(engine: Engine, wf: string, o: Order, value: Record<string, unknown> = {}, opts: { terminal?: boolean } = {}): void {
+  for (const out of o.outputs) engine.green(wf, o.run, out, value, opts);
+  engine.close(wf, o.run);
+}
+
+// ---- the happy path ----------------------------------------------------------
+
+test('happy path: planner → builder → reviewer → merger to done', () => {
+  const { engine } = makeEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+  complete(engine, wf, fire(engine, wf, 'builder', 2000), { pr: 1 });
+  complete(engine, wf, fire(engine, wf, 'reviewer', 3000), { ok: true });
+  complete(engine, wf, fire(engine, wf, 'merger', 4000), { merged: true }, { terminal: true });
+
+  const s = engine.status(wf);
+  assert.equal(s.done, true);
+  assert.equal(s.debts.length, 0);
+
+  // nothing left to do
+  assert.equal(engine.tick(wf, { now: 5000 }).orders.length, 0);
+});
+
+test('a firing carries its consumed input handles and owed reason thread', () => {
+  const { engine } = makeEngine([delivery]);
+  const wf = engine.createInstance('delivery', { provide: { proposal: { goal: 'ship it' } } });
+
+  const planner = fire(engine, wf, 'planner', 1000);
+  assert.deepEqual(planner.consumes, { proposal: { goal: 'ship it' } });
+  assert.deepEqual(planner.outputs, ['plan']);
+  assert.deepEqual(planner.owes.map((w) => w.path), ['plan']);
+});
+
+// ---- knock-back cycle (judgment reject) -------------------------------------
+
+test('knock-back: a judgment reject re-arms the producer and carries feedback', () => {
+  const { engine, store } = makeEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+  complete(engine, wf, fire(engine, wf, 'builder', 2000), { pr: 'v1' });
+
+  // reviewer rejects the pr instead of greening a verdict
+  const reviewer = fire(engine, wf, 'reviewer', 3000);
+  engine.reject(wf, 'pr', 'reviewer', 'tests fail on CI');
+  engine.close(wf, reviewer.run, 'no_work');
+
+  let s = engine.status(wf);
+  const pr = s.debts.find((d) => d.path === 'pr');
+  assert.equal(pr?.acceptance, 'rejected');
+  assert.equal(pr?.kind, 'judgment');
+  // reviewer is no longer eligible (its input is non-green), builder is re-armed
+  assert.deepEqual(s.eligible.map((e) => e.loop), ['builder']);
+
+  // the re-fired builder sees the reviewer's feedback on the owed pr
+  const builder2 = fire(engine, wf, 'builder', 4000);
+  assert.deepEqual(builder2.outputs, ['pr']);
+  assert.ok(builder2.owes[0]!.reasons.some((r) => r.text.includes('tests fail on CI')));
+  // the judgment reject bumped the §6 stall counter
+  assert.equal(store.getArtifact(wf, 'pr')?.judgmentRejects, 1);
+  complete(engine, wf, builder2, { pr: 'v2' });
+
+  // now the review passes and we finish
+  complete(engine, wf, fire(engine, wf, 'reviewer', 5000), { ok: true });
+  complete(engine, wf, fire(engine, wf, 'merger', 6000), { merged: true }, { terminal: true });
+  assert.equal(engine.status(wf).done, true);
+});
+
+// ---- §6 liveness: stall at the cap, cleared by retry ------------------------
+
+test('§6 stall: a judgment-rejected output stops re-arming at the cap, until retry', () => {
+  const { engine } = makeEngine([delivery]); // builder maxAttempts defaults to 3
+  const wf = engine.createInstance('delivery');
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+
+  // three build→reject cycles drive pr's judgment-reject count to the cap
+  let now = 2000;
+  for (let i = 1; i <= 3; i++) {
+    const builder = fire(engine, wf, 'builder', now++);
+    // the owed pr carries its running judgment count for wiring-level escalation
+    assert.equal(builder.owes.find((w) => w.path === 'pr')!.judgmentRejects, i - 1);
+    engine.green(wf, builder.run, 'pr', { pr: i });
+    engine.close(wf, builder.run);
+
+    const reviewer = fire(engine, wf, 'reviewer', now++);
+    engine.reject(wf, 'pr', 'reviewer', `attempt ${i} unfit`);
+    engine.close(wf, reviewer.run, 'no_work');
+  }
+
+  // pr now has 3 judgment rejects == cap → stalled: the engine will NOT re-fire it
+  assert.deepEqual(engine.tick(wf, { now: 9000 }).orders, [], 'a stalled output must not re-fire');
+  let s = engine.status(wf);
+  const stalled = s.debts.find((d) => d.path === 'pr');
+  assert.equal(stalled?.stalled, true);
+  assert.equal(stalled?.kind, 'judgment');
+  assert.equal(s.done, false);
+  // a stalled loop is stuck, not "blocked on inputs" (its inputs are green)
+  assert.equal(s.blocked.find((b) => b.loop === 'builder'), undefined);
+
+  // the human clears the stall with a line of guidance
+  engine.retry(wf, 'pr', 'human', 'switch to the new fixture');
+  const recovered = fire(engine, wf, 'builder', 10000);
+  const prOwe = recovered.owes.find((w) => w.path === 'pr')!;
+  assert.equal(prOwe.judgmentRejects, 0, 'retry resets the stall count');
+  assert.ok(prOwe.reasons.at(-1)!.text.includes('switch to the new fixture'));
+
+  // and the pipeline runs to completion
+  engine.green(wf, recovered.run, 'pr', { pr: 'final' });
+  engine.close(wf, recovered.run);
+  complete(engine, wf, fire(engine, wf, 'reviewer', 11000), { ok: true });
+  complete(engine, wf, fire(engine, wf, 'merger', 12000), { merged: true }, { terminal: true });
+  assert.equal(engine.status(wf).done, true);
+});
+
+// ---- forward cascade through the engine -------------------------------------
+
+test('forward cascade: re-deciding plan structurally re-rejects the green pr', () => {
+  const { engine, store } = makeEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+  complete(engine, wf, fire(engine, wf, 'builder', 2000), { pr: 'v1' });
+
+  // a human re-opens the plan; the forward cascade must invalidate the pr built on it
+  engine.reject(wf, 'plan', 'human', 'scope changed');
+
+  const s = engine.status(wf);
+  const plan = s.debts.find((d) => d.path === 'plan');
+  const pr = s.debts.find((d) => d.path === 'pr');
+  assert.equal(plan?.kind, 'judgment'); // the human's reject
+  assert.equal(pr?.kind, 'structural'); // the engine's cascade
+  // structural rejects do NOT count toward the §6 stall cap
+  assert.equal(store.getArtifact(wf, 'pr')?.judgmentRejects, 0);
+  // only planner is eligible now (builder's input went non-green)
+  assert.deepEqual(s.eligible.map((e) => e.loop), ['planner']);
+
+  // re-green the plan; builder re-arms and we can proceed
+  complete(engine, wf, fire(engine, wf, 'planner', 3000), { plan: 'v2' });
+  const builder2 = fire(engine, wf, 'builder', 4000);
+  // consumes maps each input path to its full value object
+  assert.deepEqual(builder2.consumes, { plan: { plan: 'v2' } });
+});
+
+// ---- collections: emit / seal / map / reduce --------------------------------
+
+test('collection: gather emits a set, formatcheck maps it, synthesize reduces it', () => {
+  const { engine } = makeEngine([research]);
+  const wf = engine.createInstance('research', { provide: { question: { q: 'why' } } });
+
+  // gather emits three sources then seals
+  const gather = fire(engine, wf, 'gather', 1000);
+  const created = engine.emit(wf, gather.run, [
+    { value: { s: 'a' } },
+    { value: { s: 'b' } },
+    { value: { s: 'c' } },
+  ]);
+  assert.deepEqual(created, ['gather.source[0]', 'gather.source[1]', 'gather.source[2]']);
+  engine.seal(wf, gather.run, { count: 3 });
+  engine.close(wf, gather.run);
+
+  // the map now has one firing per element; the reduce is also unblocked (it
+  // consumes the bare members + seal, which are all green)
+  const t = engine.tick(wf, { now: 2000 });
+  const fcs = t.orders.filter((o) => o.loop === 'formatcheck');
+  const syn = t.orders.filter((o) => o.loop === 'synthesize');
+  assert.deepEqual(
+    fcs.map((o) => o.key).sort(),
+    ['gather.source[0]', 'gather.source[1]', 'gather.source[2]'],
+  );
+  assert.equal(syn.length, 1);
+  assert.deepEqual(
+    syn[0]!.inputs.sort(),
+    ['gather.source.sealed', 'gather.source[0]', 'gather.source[1]', 'gather.source[2]'],
+  );
+
+  for (const o of t.orders) complete(engine, wf, o, { ok: true });
+  assert.equal(engine.status(wf).done, true);
+});
+
+test('collection: a retracted member drops out of the reduce', () => {
+  const { engine } = makeEngine([research]);
+  const wf = engine.createInstance('research');
+
+  const gather = fire(engine, wf, 'gather', 1000);
+  engine.emit(wf, gather.run, [{ value: { s: 'a' } }, { value: { s: 'b' } }]);
+  engine.seal(wf, gather.run, {});
+  engine.close(wf, gather.run);
+
+  // a human retracts source[1]; it must not block the reduce, and its formatcheck
+  // child must be tombstoned by the cascade
+  engine.retract(wf, 'gather.source[1]', 'human', 'duplicate');
+
+  // process whatever's eligible — the surviving formatcheck and the reduce
+  const t = engine.tick(wf, { now: 2000 });
+  const fcKeys = t.orders.filter((o) => o.loop === 'formatcheck').map((o) => o.key);
+  assert.deepEqual(fcKeys, ['gather.source[0]']); // only the live member maps
+  const syn = t.orders.find((o) => o.loop === 'synthesize');
+  assert.deepEqual(syn?.inputs.sort(), ['gather.source.sealed', 'gather.source[0]']);
+
+  for (const o of t.orders) complete(engine, wf, o, { ok: true });
+  assert.equal(engine.status(wf).done, true);
+});
+
+// ---- routing: skip cascade + revival ----------------------------------------
+
+const routed = def(
+  'routed',
+  [input('ticket')],
+  [
+    loop({ name: 'triage', consumes: ['ticket'], produces: ['route'] }),
+    loop({ name: 'escalate', consumes: ['route'], produces: ['escalation'] }),
+    loop({ name: 'notify', consumes: ['escalation'], produces: ['notice'] }),
+  ],
+);
+
+test('routing: a producer-skipped branch settles, cascades skip, and re-arms on revival', () => {
+  const { engine } = makeEngine([routed]);
+  const wf = engine.createInstance('routed');
+
+  complete(engine, wf, fire(engine, wf, 'triage', 1000), { route: 'simple' });
+
+  // escalate decides this ticket is not worth escalating → skips its own output
+  const escalate = fire(engine, wf, 'escalate', 2000);
+  engine.skip(wf, 'escalation', 'escalate', 'route=simple, no escalation needed');
+  engine.close(wf, escalate.run, 'skipped');
+
+  // the skip cascades to notify; the workflow is "done" (no debts remain)
+  let s = engine.status(wf);
+  assert.equal(s.done, true);
+  assert.equal(s.debts.length, 0);
+  // nothing is eligible — the dead branch is settled, not stuck
+  assert.equal(engine.tick(wf, { now: 2500 }).orders.length, 0);
+
+  // the ticket is re-triaged and the route flips → the skipped branch revives
+  engine.reject(wf, 'route', 'human', 're-triage: now urgent');
+  complete(engine, wf, fire(engine, wf, 'triage', 3000), { route: 'urgent' });
+
+  // escalate is re-armed (its skip was fingerprinted at the old route version)
+  s = engine.status(wf);
+  assert.deepEqual(s.eligible.map((e) => e.loop), ['escalate']);
+  const escalation = engine.store.getArtifact(wf, 'escalation');
+  assert.equal(escalation?.acceptance, 'owed');
+
+  // this time it really escalates, and the cascade revives notify too
+  complete(engine, wf, fire(engine, wf, 'escalate', 4000), { level: 2 });
+  complete(engine, wf, fire(engine, wf, 'notify', 5000), { sent: true });
+  assert.equal(engine.status(wf).done, true);
+});
+
+// ---- concurrency: commit-fingerprint CAS ------------------------------------
+
+test('concurrency: a stale commit is born-rejected when its input moved mid-run', () => {
+  const { engine } = makeEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+
+  // builder claims its work against plan v1
+  const builder = fire(engine, wf, 'builder', 2000);
+  assert.deepEqual(builder.consumes, { plan: { plan: 'v1' } });
+
+  // meanwhile the plan is re-decided and re-greened to v2
+  engine.reject(wf, 'plan', 'human', 'pivot');
+  complete(engine, wf, fire(engine, wf, 'planner', 2500), { plan: 'v2' });
+
+  // builder finally commits its (stale) pr → born-rejected, not green
+  const res = engine.green(wf, builder.run, 'pr', { built: 'on v1' });
+  assert.equal(res.outcome, 'born-rejected');
+  engine.close(wf, builder.run, 'failed');
+
+  // pr is still a debt; the re-fired builder now builds on v2 and greens cleanly
+  const builder2 = fire(engine, wf, 'builder', 3000);
+  assert.deepEqual(builder2.consumes, { plan: { plan: 'v2' } });
+  assert.equal(engine.green(wf, builder2.run, 'pr', { built: 'on v2' }).outcome, 'green');
+});
+
+test('a reaped run cannot commit (lease check)', () => {
+  const { engine } = makeEngine([delivery], { reapTtlMs: 100 });
+  const wf = engine.createInstance('delivery');
+
+  const planner = fire(engine, wf, 'planner', 1000);
+  // never closed; a later tick past the TTL reaps the lease and re-claims it
+  const t = engine.tick(wf, { now: 1000 + 200 });
+  assert.equal(t.reaped, 1);
+  assert.deepEqual(t.orders.map((o) => o.loop), ['planner']);
+  assert.notEqual(t.orders[0]!.run, planner.run); // a fresh lease
+
+  // the stranded original run may no longer green anything
+  assert.throws(
+    () => engine.green(wf, planner.run, 'plan', { plan: 'zombie' }),
+    /no longer holds its lease/,
+  );
+  // the fresh lease commits normally
+  assert.equal(engine.green(wf, t.orders[0]!.run, 'plan', { plan: 'live' }).outcome, 'green');
+});
+
+test('reap bumps the attempts counter', () => {
+  const { engine, store } = makeEngine([delivery], { reapTtlMs: 100 });
+  const wf = engine.createInstance('delivery');
+  fire(engine, wf, 'planner', 1000);
+  engine.tick(wf, { now: 1300 });
+  assert.equal(store.getTask(wf, 'planner', '')?.attempts, 1);
+});
+
+// ---- cadence + daily budget --------------------------------------------------
+
+test('cadence gates re-runs and the daily budget caps them', () => {
+  const poll = def(
+    'poll',
+    [input('seed')],
+    [loop({ name: 'watch', consumes: ['seed'], produces: ['report'], cadenceSecs: 60, maxRunsPerDay: 2 })],
+  );
+  const { engine } = makeEngine([poll]);
+  const wf = engine.createInstance('poll');
+
+  // first run fires immediately; we close it as no_work so `report` stays owed
+  const first = fire(engine, wf, 'watch', 10_000);
+  engine.close(wf, first.run, 'no_work');
+
+  // 30s later: still owed, but the cadence (60s) gate blocks a re-claim
+  assert.equal(engine.tick(wf, { now: 40_000 }).orders.length, 0);
+
+  // 60s later: cadence satisfied → a second run (this exhausts the daily budget)
+  const second = fire(engine, wf, 'watch', 70_000);
+  engine.close(wf, second.run, 'no_work');
+
+  // cadence is satisfied again, but the budget of 2/day is spent → no run
+  assert.equal(engine.tick(wf, { now: 140_000 }).orders.length, 0);
+});
+
+test('parallel cap limits concurrent claims of a fanned-out map', () => {
+  const fan = def(
+    'fan',
+    [input('q')],
+    [
+      loop({ name: 'gather', consumes: ['q'], produces: ['gather.item[]'] }),
+      loop({
+        name: 'work',
+        consumes: ['gather.item[$i]'],
+        produces: ['gather.item[$i].done'],
+        parallel: 2,
+      }),
+    ],
+  );
+  const { engine } = makeEngine([fan]);
+  const wf = engine.createInstance('fan');
+
+  const g = fire(engine, wf, 'gather', 1000);
+  engine.emit(wf, g.run, [{ value: {} }, { value: {} }, { value: {} }, { value: {} }]);
+  engine.seal(wf, g.run, {});
+  engine.close(wf, g.run);
+
+  // four elements are eligible, but parallel:2 caps the tick to two claims
+  const t = engine.tick(wf, { now: 2000 });
+  assert.equal(t.orders.filter((o) => o.loop === 'work').length, 2);
+});

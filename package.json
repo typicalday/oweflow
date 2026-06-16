@@ -1,0 +1,31 @@
+{
+  "name": "oweflow",
+  "version": "0.1.0",
+  "description": "A generic dataflow workflow engine — steps that owe and consume artifacts, advanced by debt and reason-carrying invalidation. Direct better-sqlite3 (WAL + commit-fingerprint CAS).",
+  "type": "module",
+  "bin": {
+    "oweflow": "bin/oweflow.mjs"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "oweflow": "node bin/oweflow.mjs",
+    "test": "node --test --test-reporter=spec test/*.test.ts",
+    "test:quiet": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test:quiet"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.3",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}
