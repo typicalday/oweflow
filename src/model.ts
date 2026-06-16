@@ -99,6 +99,21 @@ export function isGreen(a: ArtifactData | undefined): boolean {
 export function isStalled(a: ArtifactData | undefined, cap: number): boolean {
   return !!a && a.acceptance === 'rejected' && a.judgmentRejects >= cap;
 }
+/**
+ * §18 liveness: an output that has failed its declared JSON Schema `cap` times
+ * has stalled the same way (it stays a debt but stops re-arming). Tracked on a
+ * *separate* counter from judgment rejects — a schema failure is the engine
+ * refusing a malformed value, not a consumer's verdict — so the two stalls are
+ * tuned independently (`maxSchemaFailures` vs `maxAttempts`) and a `retry`
+ * clears both. A `cap` of 0 disables the schema stall (unbounded retries).
+ */
+export function isSchemaStalled(a: ArtifactData | undefined, cap: number): boolean {
+  return !!a && cap > 0 && a.acceptance === 'rejected' && a.schemaRejects >= cap;
+}
+/** An artifact is frozen (no firing re-arms it) when either stall trips. */
+function frozen(a: ArtifactData | undefined, loop: LoopDef): boolean {
+  return isStalled(a, loop.maxAttempts) || isSchemaStalled(a, loop.maxSchemaFailures);
+}
 function isSettledOut(a: ArtifactData): boolean {
   // retracted/skipped members drop out of a set; they don't block a reduce.
   return a.acceptance === 'retracted' || a.acceptance === 'skipped';
@@ -193,6 +208,7 @@ export function pendingOwed(def: WorkflowDef, arts: ArtifactMap): ArtifactData[]
       version: 0,
       reasons: [],
       judgmentRejects: 0,
+      schemaRejects: 0,
     };
     if (sealOf) a.sealOf = sealOf;
     out.push(a);
@@ -239,7 +255,7 @@ export function eligibleFirings(def: WorkflowDef, arts: ArtifactMap): Firing[] {
       if (!plainSatisfied) continue;
       const outs = plainOutputs(loop).filter((p) => {
         const a = arts.get(p);
-        return isDebt(a) && !isStalled(a, loop.maxAttempts);
+        return isDebt(a) && !frozen(a, loop);
       });
       if (outs.length) {
         firings.push({ loop: loop.name, key: '', inputs: plainPaths, outputs: outs });
@@ -258,7 +274,7 @@ export function eligibleFirings(def: WorkflowDef, arts: ArtifactMap): Firing[] {
         if (!el) continue;
         const outPath = bindProduce(mp, el.index);
         const outArt = arts.get(outPath);
-        if (!isDebt(outArt) || isStalled(outArt, loop.maxAttempts)) continue;
+        if (!isDebt(outArt) || frozen(outArt, loop)) continue;
         firings.push({
           loop: loop.name,
           key: m.path,
@@ -283,7 +299,7 @@ export function eligibleFirings(def: WorkflowDef, arts: ArtifactMap): Firing[] {
       .map((p) => p.stem)
       .filter((p) => {
         const a = arts.get(p);
-        return isDebt(a) && !isStalled(a, loop.maxAttempts);
+        return isDebt(a) && !frozen(a, loop);
       });
     if (outs.length) {
       firings.push({
@@ -412,8 +428,8 @@ export interface WorkflowStatus {
   debts: Array<{
     path: string;
     acceptance: Acceptance;
-    kind: 'judgment' | 'structural' | 'unbuilt';
-    /** §6: judgment-rejected past its producer's cap — the engine won't re-arm it */
+    kind: 'judgment' | 'structural' | 'validation' | 'unbuilt';
+    /** §6/§18: rejected past its producer's cap — the engine won't re-arm it */
     stalled: boolean;
     reason?: string;
   }>;
@@ -427,13 +443,16 @@ export function workflowStatus(def: WorkflowDef, arts: ArtifactMap): WorkflowSta
   for (const a of arts.values()) {
     if (!DEBT_STATES.has(a.acceptance)) continue;
     const last = a.reasons[a.reasons.length - 1];
-    const kind: 'judgment' | 'structural' | 'unbuilt' = last
+    const kind: 'judgment' | 'structural' | 'validation' | 'unbuilt' = last
       ? last.kind === 'judgment'
         ? 'judgment'
-        : 'structural'
+        : last.kind === 'validation'
+          ? 'validation'
+          : 'structural'
       : 'unbuilt';
     const prod = loopByName(def, a.producer);
-    const stalled = !!prod && isStalled(a, prod.maxAttempts);
+    const stalled =
+      !!prod && (isStalled(a, prod.maxAttempts) || isSchemaStalled(a, prod.maxSchemaFailures));
     const entry: WorkflowStatus['debts'][number] = { path: a.path, acceptance: a.acceptance, kind, stalled };
     if (last) entry.reason = last.text;
     debts.push(entry);

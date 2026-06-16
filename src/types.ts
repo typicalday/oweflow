@@ -27,10 +27,26 @@ export const SETTLED_STATES: ReadonlySet<Acceptance> = new Set<Acceptance>([
 /** Who/what authored a lifecycle action. */
 export type Author = 'engine' | 'human' | string; // a loop name, or these specials
 
-/** The kind of an invalidation, for the §6 liveness accounting. */
-export type RejectKind = 'judgment' | 'structural';
+/**
+ * The kind of an invalidation, for the §6 liveness accounting.
+ *  - `judgment`: a consumer's verdict ("fix it") — counts toward the §6 stall.
+ *  - `structural`: engine bookkeeping (cascade / born-rejected / re-arm) — does NOT count.
+ *  - `validation`: a produced value failed its declared JSON Schema (§18) — counts
+ *    toward a *separate* per-artifact stall bounded by the loop's `maxSchemaFailures`.
+ */
+export type RejectKind = 'judgment' | 'structural' | 'validation';
 
-export type ReasonAction = 'reject' | 'retract' | 'skip' | 'reopen' | 'retry' | 'born-rejected';
+export type ReasonAction =
+  | 'reject'
+  | 'retract'
+  | 'skip'
+  | 'reopen'
+  | 'retry'
+  | 'born-rejected'
+  | 'schema-reject';
+
+/** A JSON Schema, as authored in a definition: an object, or a boolean (allow/deny all). */
+export type JsonSchema = Record<string, unknown> | boolean;
 
 /** One entry in an artifact's append-only reason thread (design §4). */
 export interface ReasonEntry {
@@ -61,6 +77,7 @@ export interface ArtifactData {
   fingerprint?: Fingerprint; // inputs' versions at build time (on green outputs)
   reasons: ReasonEntry[]; // append-only thread
   judgmentRejects: number; // §6 stall counter — judgment rejects only
+  schemaRejects: number; // §18 stall counter — schema-validation rejects only
   /** marks a seal artifact; carries the collection name it seals */
   sealOf?: string;
   /** a green that fired irreversible cleanup cannot be re-armed (design §15.2) */
@@ -118,6 +135,8 @@ export interface ProducePattern {
   stem: string;
   binder?: string; // for map outputs: binder name
   suffix: string;
+  /** optional JSON Schema the produced value must satisfy at commit time (§18) */
+  schema?: JsonSchema;
 }
 
 /** A loop (step) definition. */
@@ -132,6 +151,8 @@ export interface LoopDef {
   maxRunsPerDay: number;
   parallel: number;
   maxAttempts: number;
+  /** §18: how many schema-validation failures an output may accrue before it stalls */
+  maxSchemaFailures: number;
   model?: string;
   workdir: string;
   /** the loop's output is a destructive completion (e.g. a merge): green is terminal (§15.2) */
@@ -156,4 +177,6 @@ export interface InputDef {
   producer: string; // "human" by convention, or any external label
   /** if true, instance start leaves it owed; otherwise it must be provided at start */
   seedOwed: boolean;
+  /** optional JSON Schema a provided input value must satisfy (§18) */
+  schema?: JsonSchema;
 }

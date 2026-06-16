@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS artifact (
   fingerprint      TEXT,
   reasons          TEXT NOT NULL DEFAULT '[]',
   judgment_rejects INTEGER NOT NULL DEFAULT 0,
+  schema_rejects   INTEGER NOT NULL DEFAULT 0,
   seal_of          TEXT,
   terminal         INTEGER NOT NULL DEFAULT 0,
   updated_at       INTEGER NOT NULL,
@@ -121,7 +122,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
-const SCHEMA_VERSION = '1';
+const SCHEMA_VERSION = '2';
 
 // ---- (de)serialization helpers ----------------------------------------------
 
@@ -144,6 +145,7 @@ interface ArtifactRowRaw {
   fingerprint: string | null;
   reasons: string;
   judgment_rejects: number;
+  schema_rejects: number;
   seal_of: string | null;
   terminal: number;
   updated_at: number;
@@ -159,6 +161,7 @@ function mapArtifact(r: ArtifactRowRaw): ArtifactRow {
     version: r.version,
     reasons: fromJson<ReasonEntry[]>(r.reasons, []),
     judgmentRejects: r.judgment_rejects,
+    schemaRejects: r.schema_rejects,
     terminal: r.terminal === 1,
     updatedAt: r.updated_at,
   };
@@ -258,12 +261,26 @@ export class Store {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('synchronous = NORMAL');
     this.db.exec(SCHEMA);
+    this.migrate();
     const cur = this.getMeta('schema_version');
-    if (cur === undefined) this.setMeta('schema_version', SCHEMA_VERSION);
+    if (cur !== SCHEMA_VERSION) this.setMeta('schema_version', SCHEMA_VERSION);
   }
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Bring an older on-disk schema forward in place. SQLite's `CREATE TABLE IF
+   * NOT EXISTS` won't add a column to a pre-existing table, so a v1 database
+   * (no `schema_rejects`) needs an explicit `ALTER TABLE`. Additive and
+   * idempotent — safe to run on every open.
+   */
+  private migrate(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(artifact)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'schema_rejects')) {
+      this.db.exec(`ALTER TABLE artifact ADD COLUMN schema_rejects INTEGER NOT NULL DEFAULT 0`);
+    }
   }
 
   /**
@@ -348,9 +365,9 @@ export class Store {
       .prepare(
         `INSERT INTO artifact
            (id, workflow, path, producer, acceptance, version, value, fingerprint,
-            reasons, judgment_rejects, seal_of, terminal, updated_at)
+            reasons, judgment_rejects, schema_rejects, seal_of, terminal, updated_at)
          VALUES (@id, @workflow, @path, @producer, @acceptance, @version, @value, @fingerprint,
-            @reasons, @judgment_rejects, @seal_of, @terminal, @updated_at)
+            @reasons, @judgment_rejects, @schema_rejects, @seal_of, @terminal, @updated_at)
          ON CONFLICT(id) DO UPDATE SET
            producer = excluded.producer,
            acceptance = excluded.acceptance,
@@ -359,6 +376,7 @@ export class Store {
            fingerprint = excluded.fingerprint,
            reasons = excluded.reasons,
            judgment_rejects = excluded.judgment_rejects,
+           schema_rejects = excluded.schema_rejects,
            seal_of = excluded.seal_of,
            terminal = excluded.terminal,
            updated_at = excluded.updated_at`,
@@ -374,6 +392,7 @@ export class Store {
         fingerprint: toJson(data.fingerprint),
         reasons: JSON.stringify(data.reasons ?? []),
         judgment_rejects: data.judgmentRejects,
+        schema_rejects: data.schemaRejects,
         seal_of: data.sealOf ?? null,
         terminal: data.terminal ? 1 : 0,
         updated_at: at,

@@ -217,7 +217,7 @@ test('collection: gather emits a set, formatcheck maps it, synthesize reduces it
 
   // gather emits three sources then seals
   const gather = fire(engine, wf, 'gather', 1000);
-  const created = engine.emit(wf, gather.run, [
+  const { created } = engine.emit(wf, gather.run, [
     { value: { s: 'a' } },
     { value: { s: 'b' } },
     { value: { s: 'c' } },
@@ -421,4 +421,138 @@ test('parallel cap limits concurrent claims of a fanned-out map', () => {
   // four elements are eligible, but parallel:2 caps the tick to two claims
   const t = engine.tick(wf, { now: 2000 });
   assert.equal(t.orders.filter((o) => o.loop === 'work').length, 2);
+});
+
+// ---- schema validation (§18) -------------------------------------------------
+
+/** A delivery whose planner output `plan` must match a JSON Schema. */
+function schemaOut(maxSchemaFailures = 3): WorkflowDef {
+  const planner = loop({ name: 'planner', consumes: ['proposal'], produces: ['plan'], maxSchemaFailures });
+  planner.produces[0]!.schema = {
+    type: 'object',
+    required: ['plan'],
+    properties: { plan: { type: 'string', minLength: 1 } },
+    additionalProperties: false,
+  };
+  return def('schemad', [input('proposal')], [
+    planner,
+    loop({ name: 'builder', consumes: ['plan'], produces: ['pr'] }),
+  ]);
+}
+
+test('schema: a conforming green is accepted', () => {
+  const { engine, store } = makeEngine([schemaOut()]);
+  const wf = engine.createInstance('schemad');
+  const o = fire(engine, wf, 'planner', 1000);
+  const res = engine.green(wf, o.run, 'plan', { plan: 'v1' });
+  assert.equal(res.outcome, 'green');
+  assert.equal(store.getArtifact(wf, 'plan')?.acceptance, 'green');
+});
+
+test('schema: a non-conforming green is schema-rejected, not greened', () => {
+  const { engine, store } = makeEngine([schemaOut()]);
+  const wf = engine.createInstance('schemad');
+  const o = fire(engine, wf, 'planner', 1000);
+  const res = engine.green(wf, o.run, 'plan', { wrong: 1 } as Record<string, unknown>);
+  assert.equal(res.outcome, 'schema-rejected');
+  assert.ok(res.issues && res.issues.length > 0, 'carries the violations');
+  assert.match(res.reason ?? '', /schema validation failed/);
+  const art = store.getArtifact(wf, 'plan');
+  assert.equal(art?.acceptance, 'rejected');
+  assert.equal(art?.version, 0, 'never greened, so version is untouched');
+  assert.equal(art?.schemaRejects, 1);
+  // the failure is recorded as a `validation` reject, distinct from a judgment one
+  const last = art!.reasons[art!.reasons.length - 1]!;
+  assert.equal(last.kind, 'validation');
+  assert.equal(last.action, 'schema-reject');
+  assert.equal(store.getArtifact(wf, 'plan')?.judgmentRejects, 0);
+});
+
+test('schema: the worker can correct and re-green on the same open run (inner-loop retry)', () => {
+  const { engine, store } = makeEngine([schemaOut()]);
+  const wf = engine.createInstance('schemad');
+  const o = fire(engine, wf, 'planner', 1000);
+  assert.equal(engine.green(wf, o.run, 'plan', { wrong: 1 } as Record<string, unknown>).outcome, 'schema-rejected');
+  // same run is still open and holds its lease — a corrected value greens
+  assert.equal(engine.green(wf, o.run, 'plan', { plan: 'fixed' }).outcome, 'green');
+  assert.equal(store.getArtifact(wf, 'plan')?.acceptance, 'green');
+  engine.close(wf, o.run);
+  assert.deepEqual(engine.tick(wf, { now: 2000 }).orders.map((x) => x.loop), ['builder']);
+});
+
+test('schema: repeated failures stall the producer after maxSchemaFailures', () => {
+  const { engine, store } = makeEngine([schemaOut(3)]);
+  const wf = engine.createInstance('schemad');
+  const o = fire(engine, wf, 'planner', 1000);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(engine.green(wf, o.run, 'plan', { bad: i } as Record<string, unknown>).outcome, 'schema-rejected');
+  }
+  assert.equal(store.getArtifact(wf, 'plan')?.schemaRejects, 3);
+  engine.close(wf, o.run, 'no_work');
+
+  // stalled: the engine will not re-arm the producer
+  assert.equal(engine.tick(wf, { now: 2000 }).orders.filter((x) => x.loop === 'planner').length, 0);
+  const plan = engine.status(wf).debts.find((d) => d.path === 'plan');
+  assert.equal(plan?.stalled, true);
+  assert.equal(plan?.kind, 'validation');
+});
+
+test('schema: a retry clears the schema stall and re-arms the producer', () => {
+  const { engine, store } = makeEngine([schemaOut(2)]);
+  const wf = engine.createInstance('schemad');
+  const o = fire(engine, wf, 'planner', 1000);
+  for (let i = 0; i < 2; i++) engine.green(wf, o.run, 'plan', { bad: i } as Record<string, unknown>);
+  engine.close(wf, o.run, 'no_work');
+  assert.equal(engine.tick(wf, { now: 2000 }).orders.filter((x) => x.loop === 'planner').length, 0);
+
+  engine.retry(wf, 'plan', 'human', 'schema fixed upstream');
+  assert.equal(store.getArtifact(wf, 'plan')?.schemaRejects, 0);
+  const o2 = fire(engine, wf, 'planner', 3000);
+  assert.equal(engine.green(wf, o2.run, 'plan', { plan: 'good' }).outcome, 'green');
+});
+
+test('schema: emit refuses a non-conforming element atomically and bumps the seal', () => {
+  const gather = loop({ name: 'gather', consumes: ['question'], produces: ['gather.source[]'] });
+  gather.produces[0]!.schema = { type: 'object', required: ['url'], properties: { url: { type: 'string' } } };
+  const d = def('research', [input('question')], [
+    gather,
+    loop({ name: 'synthesize', consumes: ['gather.source[*]'], produces: ['draft'] }),
+  ]);
+  const { engine, store } = makeEngine([d]);
+  const wf = engine.createInstance('research');
+  const g = fire(engine, wf, 'gather', 1000);
+
+  // one good + one bad: the whole emit is refused (atomic), nothing accretes
+  const bad = engine.emit(wf, g.run, [{ value: { url: 'ok' } }, { value: { nope: 1 } }]);
+  assert.equal(bad.outcome, 'schema-rejected');
+  assert.deepEqual(bad.created, []);
+  assert.ok(!store.getArtifact(wf, 'gather.source[0]'), 'no member written');
+  const seal = store.getArtifact(wf, 'gather.source.sealed');
+  assert.equal(seal?.acceptance, 'rejected');
+  assert.equal(seal?.schemaRejects, 1);
+
+  // a fully-conforming emit on the same open run succeeds and accretes from 0
+  const ok = engine.emit(wf, g.run, [{ value: { url: 'a' } }, { value: { url: 'b' } }]);
+  assert.equal(ok.outcome, 'emitted');
+  assert.deepEqual(ok.created, ['gather.source[0]', 'gather.source[1]']);
+});
+
+test('schema: createInstance rejects a provided input that violates its schema', () => {
+  const proposalIn = { ...input('proposal'), schema: { type: 'object', required: ['goal'] } };
+  const d = def('d', [proposalIn], [loop({ name: 'a', consumes: ['proposal'], produces: ['plan'] })]);
+  const { engine } = makeEngine([d]);
+  assert.throws(() => engine.createInstance('d', { provide: { proposal: { nope: 1 } } }), /failed schema/);
+  const wf = engine.createInstance('d', { provide: { proposal: { goal: 'ship' } } });
+  assert.ok(engine.status(wf).eligible.some((f) => f.loop === 'a'));
+});
+
+test('schema: provideInput rejects a value that violates the input schema', () => {
+  const proposalIn = { ...input('proposal', { seedOwed: true }), schema: { type: 'object', required: ['goal'] } };
+  const d = def('d', [proposalIn], [loop({ name: 'a', consumes: ['proposal'], produces: ['plan'] })]);
+  const { engine, store } = makeEngine([d]);
+  const wf = engine.createInstance('d');
+  assert.throws(() => engine.provideInput(wf, 'proposal', { nope: 1 }), /failed schema/);
+  assert.equal(store.getArtifact(wf, 'proposal')?.acceptance, 'owed', 'rejected provide leaves it owed');
+  engine.provideInput(wf, 'proposal', { goal: 'ship' });
+  assert.equal(store.getArtifact(wf, 'proposal')?.acceptance, 'green');
 });

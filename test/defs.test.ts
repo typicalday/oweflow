@@ -140,14 +140,17 @@ test('the knock-back graph is NOT a cycle (reject is runtime, not a dep edge)', 
   assert.deepEqual(errors, []);
 });
 
-test('buildDef rejects consumes/produces that are not a list of strings', () => {
+test('buildDef rejects consumes that are not a list of strings', () => {
   assert.throws(
     () => buildDef({ name: 'bad', inputs: [{ name: 'a' }], loops: [{ name: 'x', consumes: 'a', produces: ['y'] }] }),
     /must be a list of strings/,
   );
+});
+
+test('buildDef rejects a produce entry that is neither a string nor a { name, schema }', () => {
   assert.throws(
     () => buildDef({ name: 'bad', inputs: [{ name: 'a' }], loops: [{ name: 'x', consumes: ['a'], produces: [42] }] }),
-    /must be a list of strings/,
+    /must be a string or a \{ name, schema \} mapping/,
   );
 });
 
@@ -214,6 +217,97 @@ test('validateDef flags a per-element produce with no map consume to bind it', (
     ],
   }));
   assert.ok(errors.some((e) => e.includes('no map ($i) consume to bind it')), errors.join('; '));
+});
+
+test('parseDef attaches a JSON Schema to a produce given as { name, schema }', () => {
+  const def = parseDef({
+    name: 'schemad',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'planner',
+        consumes: ['q'],
+        produces: [{ name: 'plan', schema: { type: 'object', required: ['plan'] } }],
+      },
+    ],
+  });
+  const plan = def.loops[0]!.produces[0]!;
+  assert.equal(plan.stem, 'plan');
+  assert.deepEqual(plan.schema, { type: 'object', required: ['plan'] });
+});
+
+test('parseDef leaves produces without a schema undefined and accepts mixed entries', () => {
+  const def = parseDef({
+    name: 'mixed',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'planner',
+        consumes: ['q'],
+        produces: ['plan', { name: 'notes', schema: { type: 'object' } }],
+      },
+    ],
+  });
+  assert.equal(def.loops[0]!.produces[0]!.schema, undefined);
+  assert.deepEqual(def.loops[0]!.produces[1]!.schema, { type: 'object' });
+});
+
+test('parseDef attaches a JSON Schema to an input', () => {
+  const def = parseDef({
+    name: 'schemad-in',
+    inputs: [{ name: 'proposal', schema: { type: 'object', required: ['text'] } }],
+    loops: [{ name: 'a', consumes: ['proposal'], produces: ['plan'] }],
+  });
+  assert.deepEqual(def.inputs[0]!.schema, { type: 'object', required: ['text'] });
+});
+
+test('parseDef fills maxSchemaFailures default and parses an override', () => {
+  const def = parseDef({
+    name: 'caps',
+    inputs: [{ name: 'q' }],
+    loops: [
+      { name: 'a', consumes: ['q'], produces: ['plan'] },
+      { name: 'b', consumes: ['plan'], produces: ['pr'], maxSchemaFailures: 2 },
+    ],
+  });
+  assert.equal(def.loops[0]!.maxSchemaFailures, 5);
+  assert.equal(def.loops[1]!.maxSchemaFailures, 2);
+});
+
+test('buildDef rejects a malformed produce schema with a DefError', () => {
+  assert.throws(
+    () =>
+      buildDef({
+        name: 'bad',
+        inputs: [{ name: 'q' }],
+        loops: [{ name: 'a', consumes: ['q'], produces: [{ name: 'plan', schema: 42 }] }],
+      }),
+    (e: unknown) => e instanceof DefError && /must be a JSON Schema object or boolean/.test((e as Error).message),
+  );
+});
+
+test('buildDef rejects a malformed input schema with a DefError', () => {
+  assert.throws(
+    () =>
+      buildDef({
+        name: 'bad',
+        inputs: [{ name: 'q', schema: 'not-a-schema' }],
+        loops: [{ name: 'a', consumes: ['q'], produces: ['plan'] }],
+      }),
+    DefError,
+  );
+});
+
+test('buildDef rejects a produce schema with an unresolved $ref (gross error at load)', () => {
+  assert.throws(
+    () =>
+      buildDef({
+        name: 'bad',
+        inputs: [{ name: 'q' }],
+        loops: [{ name: 'a', consumes: ['q'], produces: [{ name: 'plan', schema: { $ref: '#/nope' } }] }],
+      }),
+    (e: unknown) => e instanceof DefError && /is not a valid JSON Schema/.test((e as Error).message),
+  );
 });
 
 test('loadDefs discovers a workflow.yaml inside a subdirectory', () => {

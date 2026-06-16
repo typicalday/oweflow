@@ -284,7 +284,7 @@ function dispatch(command: string, io: CliIO, args: Args): void {
         }
         if (!Array.isArray(parsed)) throw new CliError('--items must be a JSON array');
         const items = parsed.map((v) => ({ value: v as Record<string, unknown> }));
-        print(io, { created: engine.emit(wf, run, items) });
+        print(io, engine.emit(wf, run, items));
         return;
       }
       case 'seal': {

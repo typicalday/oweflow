@@ -28,11 +28,14 @@ import {
   workflowStatus,
 } from './model.ts';
 import type { ArtifactMap, CascadeOp, Firing, WorkflowStatus } from './model.ts';
+import { summarizeIssues, validateValue } from './schema.ts';
+import type { SchemaIssue } from './schema.ts';
 import { localMidnightMs, nowMs, randId } from './util.ts';
 import type { Store } from './store.ts';
 import type {
   ArtifactData,
   Author,
+  JsonSchema,
   LoopDef,
   ReasonEntry,
   RejectKind,
@@ -57,7 +60,13 @@ export interface Order {
   /** captured handles of the green inputs this run builds on */
   consumes: Record<string, unknown>;
   /** the owed outputs and their accumulated reason threads (the feedback channel) */
-  owes: Array<{ path: string; acceptance: string; judgmentRejects: number; reasons: ReasonEntry[] }>;
+  owes: Array<{
+    path: string;
+    acceptance: string;
+    judgmentRejects: number;
+    schemaRejects: number;
+    reasons: ReasonEntry[];
+  }>;
 }
 
 export interface TickResult {
@@ -68,8 +77,19 @@ export interface TickResult {
 
 export interface CommitResult {
   path: string;
-  outcome: 'green' | 'born-rejected';
+  outcome: 'green' | 'born-rejected' | 'schema-rejected';
   reason?: string;
+  /** the schema violations, when `outcome` is `schema-rejected` (§18) */
+  issues?: SchemaIssue[];
+}
+
+/** The outcome of an `emit` (collection accretion) — possibly schema-refused. */
+export interface EmitResult {
+  outcome: 'emitted' | 'born-rejected' | 'schema-rejected';
+  /** the element paths created (empty unless `emitted`) */
+  created: string[];
+  reason?: string;
+  issues?: SchemaIssue[];
 }
 
 export interface CreateOpts {
@@ -106,6 +126,12 @@ export class Engine {
 
       for (const input of def.inputs) {
         const provided = opts.provide?.[input.name];
+        if (provided !== undefined && input.schema !== undefined) {
+          const check = validateValue(input.schema, provided);
+          if (!check.valid) {
+            throw new Error(`input '${input.name}' failed schema: ${summarizeIssues(check.issues)}`);
+          }
+        }
         const seedGreen = !input.seedOwed || provided !== undefined;
         const a: ArtifactData = {
           workflow: id,
@@ -115,6 +141,7 @@ export class Engine {
           version: seedGreen ? 1 : 0,
           reasons: [],
           judgmentRejects: 0,
+          schemaRejects: 0,
         };
         if (provided !== undefined) a.value = provided;
         this.store.putArtifact(a);
@@ -127,9 +154,19 @@ export class Engine {
   /** A human/external producer supplies (greens) an owed input. */
   provideInput(workflow: string, name: string, value: Record<string, unknown>): void {
     const def = this.defFor(workflow);
+    const inputDef = def.inputs.find((i) => i.name === name);
     this.store.tx(() => {
       const art = this.store.getArtifact(workflow, name);
       if (!art) throw new Error(`no such input artifact: ${name}`);
+      // §18: validate inside the tx (as `createInstance` does) so the value is
+      // checked against — and committed atomically with — the state the write
+      // sees, with no window where a concurrent mutation could intervene.
+      if (inputDef?.schema !== undefined) {
+        const check = validateValue(inputDef.schema, value);
+        if (!check.valid) {
+          throw new Error(`input '${name}' failed schema: ${summarizeIssues(check.issues)}`);
+        }
+      }
       this.store.putArtifact({
         ...art,
         acceptance: 'green',
@@ -239,6 +276,7 @@ export class Engine {
         path: p,
         acceptance: a?.acceptance ?? 'owed',
         judgmentRejects: a?.judgmentRejects ?? 0,
+        schemaRejects: a?.schemaRejects ?? 0,
         reasons: a?.reasons ?? [],
       };
     });
@@ -291,6 +329,26 @@ export class Engine {
         return { path, outcome: 'born-rejected', reason: cas.reason };
       }
 
+      // §18: enforce the declared output schema *before* greening. A malformed
+      // value is refused (not greened) and bumps the schema-stall counter. The
+      // run/lease is left open, so the worker can correct and re-`green` on the
+      // same run; the per-artifact counter is the real (unbypassable) bound.
+      const schema = this.produceSchema(def, art);
+      if (schema !== undefined) {
+        const check = validateValue(schema, value);
+        if (!check.valid) {
+          const text = `schema validation failed: ${summarizeIssues(check.issues)}`;
+          this.store.putArtifact({
+            ...art,
+            acceptance: 'rejected',
+            schemaRejects: art.schemaRejects + 1,
+            reasons: [...art.reasons, reason('schema-reject', 'validation', 'engine', text, art.version)],
+          });
+          this.settle(workflow, def);
+          return { path, outcome: 'schema-rejected', reason: text, issues: check.issues };
+        }
+      }
+
       const next: ArtifactData = {
         ...art,
         acceptance: 'green',
@@ -314,7 +372,7 @@ export class Engine {
    * index. CAS'd against the producer's plain inputs; a moved input born-rejects
    * the seal instead of emitting.
    */
-  emit(workflow: string, run: string, items: Array<{ value: Record<string, unknown> }>): string[] {
+  emit(workflow: string, run: string, items: Array<{ value: Record<string, unknown> }>): EmitResult {
     const def = this.defFor(workflow);
     return this.store.tx(() => {
       const r = this.openRun(workflow, run);
@@ -329,7 +387,35 @@ export class Engine {
         const seal = arts.get(sealPath(stem));
         if (seal) this.bornReject(seal, cas.moved);
         this.settle(workflow, def);
-        return [];
+        return { outcome: 'born-rejected', created: [], reason: cas.reason };
+      }
+
+      // §18: every emitted element must satisfy the collection's declared schema.
+      // The check is atomic — one bad item accretes nothing and bumps the seal's
+      // schema-stall counter — so a producer can't half-fill a collection with
+      // malformed members and the run can correct and re-emit on the same lease.
+      const schema = loop.produces.find((p) => p.kind === 'collection' && p.stem === stem)?.schema;
+      if (schema !== undefined) {
+        for (let i = 0; i < items.length; i++) {
+          const check = validateValue(schema, items[i]!.value);
+          if (!check.valid) {
+            // The seal is materialized for every collection producer (pendingOwed),
+            // so an open `emit` run always has one; its absence is a broken
+            // invariant, not a soft path — surface it rather than silently
+            // dropping the schema-stall bump and corrupting liveness.
+            const seal = arts.get(sealPath(stem));
+            if (!seal) throw new Error(`collection seal missing for ${stem}`);
+            const text = `schema validation failed (item ${i}): ${summarizeIssues(check.issues)}`;
+            this.store.putArtifact({
+              ...seal,
+              acceptance: 'rejected',
+              schemaRejects: seal.schemaRejects + 1,
+              reasons: [...seal.reasons, reason('schema-reject', 'validation', 'engine', text, seal.version)],
+            });
+            this.settle(workflow, def);
+            return { outcome: 'schema-rejected', created: [], reason: text, issues: check.issues };
+          }
+        }
       }
 
       let next = nextIndex(arts, stem);
@@ -347,11 +433,12 @@ export class Engine {
           fingerprint: fp,
           reasons: [],
           judgmentRejects: 0,
+          schemaRejects: 0,
         });
         created.push(p);
       }
       this.settle(workflow, def);
-      return created;
+      return { outcome: 'emitted', created };
     });
   }
 
@@ -462,6 +549,7 @@ export class Engine {
         ...art,
         acceptance: 'owed',
         judgmentRejects: 0,
+        schemaRejects: 0,
         reasons: [...art.reasons, reason('retry', 'structural', by, text, art.version)],
       });
       this.settle(workflow, def);
@@ -607,6 +695,26 @@ export class Engine {
     const l = def.loops.find((x) => x.name === name);
     if (!l) throw new Error(`no such loop in ${def.name}: ${name}`);
     return l;
+  }
+
+  /**
+   * The JSON Schema (if any) declared for the artifact `art` greened by `green()`
+   * — a map child binds to its loop's per-element produce, everything else to a
+   * singleton produce. Seals/collection elements go through `seal`/`emit` and are
+   * not handled here. Returns undefined when no schema is declared (the default).
+   */
+  private produceSchema(def: WorkflowDef, art: ArtifactData): JsonSchema | undefined {
+    const loop = def.loops.find((l) => l.name === art.producer);
+    if (!loop) return undefined;
+    const el = parseElement(art.path);
+    if (el && el.suffix !== '') {
+      const mp = loop.produces.find(
+        (p) => p.kind === 'map' && p.stem === el.stem && p.suffix === el.suffix,
+      );
+      return mp?.schema;
+    }
+    const sp = loop.produces.find((p) => p.kind === 'singleton' && p.stem === art.path);
+    return sp?.schema;
   }
 
   /**

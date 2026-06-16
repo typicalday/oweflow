@@ -65,14 +65,23 @@ Three things make this more than a topological sort:
   debts — no orchestration code required.
 - **Reason threads.** A `reject` carries text. The next order for that artifact
   shows the accumulated `reasons`, so the worker knows *why* it's being asked
-  again. Rejections come in two kinds: **judgment** (a consumer's verdict) and
-  **structural** (engine bookkeeping from a cascade). Only judgment rejects
-  count against liveness.
-- **Stalls (liveness, §6).** If an artifact is judgment-rejected more than its
-  loop's `maxAttempts`, the engine **stops re-arming it**. It stays a debt but
-  no longer produces orders — the loop has demonstrably failed and a human is
-  needed. `oweflow retry` resets the counter (optionally with new guidance);
-  `oweflow retract` drops it (for collection members).
+  again. Rejections come in three kinds: **judgment** (a consumer's verdict),
+  **validation** (a produced value failed the artifact's declared JSON Schema —
+  the engine's own refusal), and **structural** (engine bookkeeping from a
+  cascade). Judgment and validation rejects count against liveness on separate
+  counters; structural ones never do.
+- **Schema validation (§18).** An artifact may declare a `schema:` (full JSON
+  Schema draft 2020-12). A produced value is accepted only if it validates;
+  otherwise the commit is refused (**schema-rejected**) with the violations
+  attached, the value never greens, and the worker can correct it on the same
+  open run. Shape is the engine's business; *meaning* stays a consumer's
+  judgment.
+- **Stalls (liveness, §6/§18).** If an artifact is judgment-rejected more than
+  its loop's `maxAttempts` — or schema-rejected more than its `maxSchemaFailures`
+  — the engine **stops re-arming it**. It stays a debt but no longer produces
+  orders — the loop has demonstrably failed and a human is needed. `oweflow
+  retry` resets both counters (optionally with new guidance); `oweflow retract`
+  drops it (for collection members).
 
 Collections add fan-out/fan-in:
 
@@ -88,7 +97,9 @@ Collections add fan-out/fan-in:
 
 - **Node ≥ 22.6** — oweflow runs TypeScript directly via Node's native type
   stripping. There is no build step. (Developed on Node 25.)
-- That's it. `better-sqlite3` and `yaml` are the only runtime deps.
+- Runtime deps: `better-sqlite3` (storage), `yaml` (defs), and
+  `@cfworker/json-schema` (artifact schema validation, §18) — all
+  zero- or low-transitive.
 
 ```sh
 git clone <repo> oweflow && cd oweflow
@@ -179,7 +190,7 @@ Global: `--db <path>` (env `OWEFLOW_DB`, default `.oweflow/state.db`) and
   "prompt":  "…body with ${WORKFLOW}/${RUN}/${INDEX} substituted…",
   "consumes": { "plan": { /* captured green handle */ } },
   "owes": [                // the feedback channel
-    { "path": "pr", "acceptance": "rejected", "judgmentRejects": 2,
+    { "path": "pr", "acceptance": "rejected", "judgmentRejects": 2, "schemaRejects": 0,
       "reasons": [ { "action": "reject", "kind": "judgment", "by": "reviewer",
                      "text": "tests are missing", "at": 0 } ] }
   ]
@@ -188,7 +199,8 @@ Global: `--db <path>` (env `OWEFLOW_DB`, default `.oweflow/state.db`) and
 
 A worker reads `prompt` + `consumes` + `owes`, does the work, then reports the
 result with `green` (or `emit`/`seal` for collections), and finally `close`s the
-run. `owes[].judgmentRejects` lets a wiring escalate (e.g. switch to a stronger
+run. `owes[].judgmentRejects` (and `owes[].schemaRejects`, §18) let a wiring
+escalate (e.g. switch to a stronger
 model) before the engine stalls the artifact.
 
 ---
@@ -210,16 +222,25 @@ inputs:                        # external artifacts, seeded when an instance sta
   - name: proposal
     seedOwed: true             # true → starts owed (must be `provide`d to unblock)
     producer: human            # optional label for who supplies it (default: human)
+    schema:                    # optional JSON Schema (2020-12); a `provide`d value
+      type: object             #   that violates it is refused (§18)
+      required: [text]
 
 loops:
   - name: planner
     consumes: [proposal]       # plain | map (src[$i]) | reduce (src[*])
-    produces: [plan]           # singleton | collection (src[]) | map (src[$i].x)
+    produces:                  # singleton | collection (src[]) | map (src[$i].x)
+      - name: plan             # a produce may be a bare name, or {name, schema}:
+        schema:                #   a green/emit whose value fails this is refused (§18)
+          type: object
+          required: [plan]
+          properties: { plan: { type: string } }
     body: |                    # prompt; ${WORKFLOW} ${RUN} ${INDEX} are substituted
       Read the proposal and produce a `plan`.
 
     # all optional, with defaults:
     maxAttempts: 3             # judgment-reject cap before the output stalls (§6)
+    maxSchemaFailures: 5       # schema-reject cap before the output stalls (§18); 0 = off
     parallel: 1                # max concurrent runs (raise it to fan out a map)
     terminal: false            # true → a green output is a destructive completion,
                                #        never re-armed by the cascade (§15.2)
@@ -281,7 +302,8 @@ once, in the engine, and every wiring inherits them.
 | [`src/types.ts`](src/types.ts) | shared types: the five-state lifecycle, reason threads, def shapes |
 | [`src/paths.ts`](src/paths.ts) | parse/match the `src[$i]` / `src[*]` / `src[]` path grammar |
 | [`src/defs.ts`](src/defs.ts) | load YAML → validated `WorkflowDef` (static wiring checks) |
-| [`src/model.ts`](src/model.ts) | the pure core: `eligibleFirings`, the cascade, `workflowStatus`, `isStalled` |
+| [`src/schema.ts`](src/schema.ts) | JSON Schema validation of artifact values (§18), via `@cfworker/json-schema` |
+| [`src/model.ts`](src/model.ts) | the pure core: `eligibleFirings`, the cascade, `workflowStatus`, `isStalled`/`isSchemaStalled` |
 | [`src/store.ts`](src/store.ts) | better-sqlite3 persistence; transactions; the commit CAS |
 | [`src/engine.ts`](src/engine.ts) | the imperative shell: `tick`/`green`/`reject`/… → mutate → `settle()` |
 | [`src/cli.ts`](src/cli.ts) | argv → engine calls, JSON on stdout |
@@ -311,11 +333,11 @@ npm run typecheck # tsc --noEmit (erasable-syntax only — verifies type-strip s
 npm run check     # both
 ```
 
-The suite (137 tests) spans unit tests (`paths`, `store`, `model`, `defs`,
-`util`, `cli`), engine integration tests (the cascade, the §6 stall,
-concurrency/CAS), and **40 end-to-end tests** that spawn the real
-`bin/oweflow.mjs` binary and drive the three example workflows (`delivery`,
-`research`, `routing`) through their full lifecycles.
+The suite (172 tests) spans unit tests (`paths`, `store`, `model`, `defs`,
+`schema`, `util`, `cli`), engine integration tests (the cascade, the §6 stall,
+schema validation/§18, concurrency/CAS), and **47 end-to-end tests** that spawn
+the real `bin/oweflow.mjs` binary and drive the example workflows through their
+full lifecycles.
 
 Two e2e files carry most of that weight, by opposite intent.
 [`test/edge.e2e.test.ts`](test/edge.e2e.test.ts) is a 26-case edge battery aimed
@@ -333,6 +355,12 @@ the reason thread riding the next order (§4), stall → retry → re-stall with
 `blocked` excluding the stalled loop (§6/§17), and the level-trigger
 re-firing on a re-provided input while staying idempotent on a healthy graph and
 leaving a terminal output untouched (§7).
+[`test/schema.e2e.test.ts`](test/schema.e2e.test.ts) drives the §18 surface end
+to end against a schema-pinned fixture: a malformed singleton is schema-rejected
+rather than greened, a corrected value greens on the same open run, repeated
+failures trip the `maxSchemaFailures` stall and a `retry` clears it, a malformed
+collection element refuses the whole `emit` atomically, and a schema-violating
+input is refused at `create` with a non-zero exit.
 
 ---
 

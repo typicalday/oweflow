@@ -17,6 +17,7 @@ function artifact(workflow: string, path: string, over: Partial<ArtifactData> = 
     version: 0,
     reasons: [],
     judgmentRejects: 0,
+    schemaRejects: 0,
     ...over,
   };
 }

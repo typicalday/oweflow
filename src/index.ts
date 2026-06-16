@@ -13,7 +13,7 @@
  */
 
 export { Engine } from './engine.ts';
-export type { CommitResult, CreateOpts, DefResolver, Order, TickResult } from './engine.ts';
+export type { CommitResult, CreateOpts, DefResolver, EmitResult, Order, TickResult } from './engine.ts';
 
 export { Store, openStore } from './store.ts';
 export type { ArtifactRow, RunRow, TaskRow, WorkflowRow } from './store.ts';
@@ -22,6 +22,7 @@ export { buildDef, DefError, loadDefFile, loadDefs, parseDef, validateDef } from
 
 export {
   eligibleFirings,
+  isSchemaStalled,
   isStalled,
   maintainDecisions,
   workflowStatus,
@@ -33,6 +34,9 @@ export {
   parseProduce,
 } from './paths.ts';
 
+export { assertValidSchema, summarizeIssues, validateValue } from './schema.ts';
+export type { SchemaCheck, SchemaIssue } from './schema.ts';
+
 export { DEBT_STATES, SETTLED_STATES } from './types.ts';
 export type {
   Acceptance,
@@ -41,6 +45,7 @@ export type {
   ConsumePattern,
   Fingerprint,
   InputDef,
+  JsonSchema,
   LoopDef,
   ProducePattern,
   ReasonEntry,

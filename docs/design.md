@@ -19,7 +19,8 @@ function rather than a feature bolted beside it.
   `acceptance` state, a monotonic `version` (0 until first green, +1 each green
   re-production), an optional captured `value` (a handle, meaningful only when
   green), a `fingerprint` (the versions of its inputs at build time), an
-  append-only `reasons` thread, and the `judgmentRejects` counter.
+  append-only `reasons` thread, and two stall counters — `judgmentRejects` (§6)
+  and `schemaRejects` (§18).
 - **§2.2 Task / lease** — the claimable unit of work-in-flight. One per
   `(loop, key)`; `key` is `""` for plain/reduce/collection firings and the
   element path for a map firing.
@@ -42,8 +43,9 @@ A loop's eligibility depends on its consume mode:
 
 ## §4 Reason threads
 
-Every invalidating action (`reject`, `retract`, `skip`, `reopen`, `retry`,
-`born-rejected`) appends a `ReasonEntry { at, action, kind, by, text, fromVersion }`
+Every invalidating action (`reject`, `schema-reject`, `retract`, `skip`,
+`reopen`, `retry`, `born-rejected`) appends a
+`ReasonEntry { at, action, kind, by, text, fromVersion }`
 to the artifact. The thread is append-only and travels with the artifact, so the
 next order to (re)produce it carries the full feedback history in `owes[].reasons`.
 
@@ -62,24 +64,28 @@ its inputs revive.
 
 ## §6 Liveness — stalls
 
-Two reject **kinds** (§11.9) are tracked separately:
+Three reject **kinds** (§11.9) are tracked:
 
 - **judgment** — a consumer's verdict that the artifact is wrong. Bumps
   `judgmentRejects`.
+- **validation** — a produced value failed the artifact's declared JSON Schema;
+  the engine refused the commit (§18). Bumps a *separate* `schemaRejects`
+  counter.
 - **structural** — engine bookkeeping (a forward-cascade re-arm, a born-rejected
-  commit). Does **not** bump the counter.
+  commit). Bumps **neither** counter.
 
-The counter rides on the *judged artifact*. Once `judgmentRejects ≥ maxAttempts`
-the artifact is **stalled**: it remains a debt, but `eligibleFirings` stops
-producing any firing that would rebuild it. The loop has demonstrably failed; a
-human must intervene. `isStalled(a, cap)` is the predicate; `status.debts[].stalled`
-surfaces it; `blocked` deliberately excludes a stalled loop (it isn't waiting on
-an input — it's out of attempts).
+A counter rides on the *judged artifact*. Once `judgmentRejects ≥ maxAttempts`
+(or `schemaRejects ≥ maxSchemaFailures`, §18) the artifact is **stalled**: it
+remains a debt, but `eligibleFirings` stops producing any firing that would
+rebuild it. The loop has demonstrably failed; a human must intervene.
+`isStalled(a, cap)` and `isSchemaStalled(a, cap)` are the predicates;
+`status.debts[].stalled` surfaces either; `blocked` deliberately excludes a
+stalled loop (it isn't waiting on an input — it's out of attempts).
 
 Clearing a stall:
-- **`retry`** — reset `judgmentRejects` to 0 and re-owe the artifact (optionally
-  with fresh guidance appended as a `retry` reason). The only path that resets the
-  counter.
+- **`retry`** — reset *both* counters to 0 and re-owe the artifact (optionally
+  with fresh guidance appended as a `retry` reason). The only path that resets
+  the counters.
 - **`retract`** — drop the member (collection elements).
 
 ## §7 The forward cascade (level-triggered)
@@ -107,7 +113,7 @@ order-independent — re-running `settle()` on a healthy graph yields no ops.
 - **§11.x reduce `src[*]`** — fan-in: see §3.
 - **§11.3** — the five-state lifecycle (above).
 - **§11.8** — the forward cascade (above).
-- **§11.9** — the two reject kinds (above).
+- **§11.9** — the three reject kinds (above): judgment, validation (§18), structural.
 
 ## §12 Concurrency
 
@@ -135,10 +141,66 @@ order-independent — re-running `settle()` on a healthy graph yields no ops.
 
 - `done` — no debts remain.
 - `debts[]` — each non-green-owing artifact with its `acceptance`, `kind`
-  (`judgment` / `structural` / `unbuilt`), `stalled` flag, and latest `reason`.
+  (`judgment` / `validation` / `structural` / `unbuilt`), `stalled` flag, and
+  latest `reason`.
 - `eligible[]` — the firings that could run right now.
 - `blocked[]` — loops that owe something but whose inputs aren't all green, with
   the specific non-green inputs holding them back (stalled loops excluded).
 
 This is the operator's whole view, and because it is a pure read it can never
 drift from the real state the engine acts on.
+
+## §18 Schema validation
+
+The engine is domain-neutral — it doesn't know what a `plan` *means*. But a
+wiring may still want to guarantee its *shape*: that a `plan` is an object with
+the fields its consumers expect, that an emitted `source` carries a `url`. An
+artifact declaration (a `produces` entry or an `inputs` entry) may therefore
+carry a `schema:` — a full **JSON Schema draft 2020-12** document, validated by
+`@cfworker/json-schema` (zero codegen, near-zero transitive deps). A schema that
+is itself malformed fails fast at **load** (`assertValidSchema` in defs.ts runs a
+trial validation to force lazy `$ref` resolution), never at first commit.
+
+**Enforcement is at commit time, and it is a refusal — not a verdict.** Shape is
+the engine's business; *meaning* stays a consumer's `reject` (§6 judgment).
+
+- **`green` (singleton / map output).** After the commit CAS (§12.2) passes, the
+  value is validated against the produce's schema. On failure the green is
+  refused: the artifact is written back `rejected` with `schemaRejects + 1`, a
+  `schema-reject` reason (kind `validation`) carrying the summarized violations
+  is appended, and the commit returns `outcome: 'schema-rejected'` **with the
+  `issues[]`** — but the run/lease is *not* closed. The same worker can correct
+  the value and re-`green` on the same open run; the per-artifact counter is the
+  only bound, so a re-green can't bypass the stall.
+- **`emit` (collection).** Every element is validated against the collection's
+  schema *before any element is written*. One bad element refuses the **whole**
+  emit atomically (nothing accretes), bumps the seal's `schemaRejects`, and
+  returns `schema-rejected`. This stops a producer half-filling a collection with
+  malformed members.
+- **`provide` / `create` (inputs).** A `seedOwed` input supplied via `provide`,
+  or an input supplied at `create`, is validated against the input's schema
+  before it is seeded green. A violation is a hard error (non-zero CLI exit) —
+  there is no producer to re-arm, so refusing outright is the only honest move.
+
+**Liveness (§6 parallel).** Schema failures ride a counter *separate* from
+judgment rejects, because they are categorically different — the engine refusing
+a malformed value, not a consumer disagreeing with a sound one. Once
+`schemaRejects ≥ maxSchemaFailures` the artifact is **schema-stalled**
+(`isSchemaStalled`): it stays a debt but stops re-arming, exactly like a §6
+judgment stall. The two caps (`maxSchemaFailures`, default 5; `maxAttempts`) are
+tuned independently, a `maxSchemaFailures` of 0 disables the schema stall, and a
+single `retry` resets *both* counters. `validateValue` is total — a schema that
+somehow throws at validate time (an unresolved `$ref`, a stack overflow on a
+self-referential schema + deeply nested value) is folded into an ordinary
+validation failure rather than crashing the commit, and the surrounding
+transaction rolls back cleanly.
+
+**Trust boundary.** A schema is *operator-authored configuration* loaded from the
+trusted `--defs` directory; the value it validates comes from a worker. The
+engine assumes the schema itself is benign — in particular, a `pattern` /
+`patternProperties` regex is compiled with `new RegExp(…, 'u')`, so a
+catastrophically-backtracking pattern is an operator foot-gun (it could stall the
+single-threaded engine on an adversarial value), not an attacker lever. Keep
+`pattern`s linear. Worker-supplied *values* need no such trust: a malformed value
+is just a schema-reject, bounded by `maxSchemaFailures`, and CLI values are
+additionally bounded by the OS argument limit.

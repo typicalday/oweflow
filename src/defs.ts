@@ -25,7 +25,8 @@ import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { parseConsume, parseProduce } from './paths.ts';
 import { parseDurationSecs } from './util.ts';
-import type { InputDef, LoopDef, WorkflowDef } from './types.ts';
+import { assertValidSchema } from './schema.ts';
+import type { InputDef, JsonSchema, LoopDef, ProducePattern, WorkflowDef } from './types.ts';
 
 // ---- raw (pre-validation) YAML shapes ---------------------------------------
 
@@ -33,6 +34,12 @@ interface RawInput {
   name?: unknown;
   producer?: unknown;
   seedOwed?: unknown;
+  schema?: unknown;
+}
+/** A produce entry: either a bare `"plan"` string, or `{ name, schema }`. */
+interface RawProduce {
+  name?: unknown;
+  schema?: unknown;
 }
 interface RawLoop {
   name?: unknown;
@@ -43,6 +50,7 @@ interface RawLoop {
   maxRunsPerDay?: unknown;
   parallel?: unknown;
   maxAttempts?: unknown;
+  maxSchemaFailures?: unknown;
   model?: unknown;
   workdir?: unknown;
   terminal?: unknown;
@@ -63,6 +71,7 @@ const DEFAULTS = {
   maxRunsPerDay: 1000,
   parallel: 1,
   maxAttempts: 3,
+  maxSchemaFailures: 5,
   workdir: 'main',
 } as const;
 
@@ -89,6 +98,36 @@ function asBool(v: unknown, fallback: boolean, ctx: string): boolean {
   if (typeof v !== 'boolean') throw new DefError(`${ctx} must be a boolean`);
   return v;
 }
+/** Coerce + validate a JSON Schema, re-raising schema.ts errors as DefErrors. */
+function asSchema(v: unknown, ctx: string): JsonSchema {
+  try {
+    assertValidSchema(v, ctx);
+  } catch (e) {
+    throw new DefError((e as Error).message);
+  }
+  return v as JsonSchema;
+}
+
+/**
+ * Parse a loop's `produces` list. Each entry is either a bare pattern string
+ * (`plan`, `gather.source[]`) or a mapping `{ name, schema }` attaching a JSON
+ * Schema the produced value must satisfy at commit time (§18).
+ */
+function parseProduces(v: unknown, ctx: string): ProducePattern[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new DefError(`${ctx} must be a list`);
+  return v.map((entry, i) => {
+    if (typeof entry === 'string') return parseProduce(entry);
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      const raw = entry as RawProduce;
+      const name = asString(raw.name, `${ctx}[${i}].name`);
+      const pat = parseProduce(name);
+      if (raw.schema !== undefined) pat.schema = asSchema(raw.schema, `produce '${name}'.schema`);
+      return pat;
+    }
+    throw new DefError(`${ctx}[${i}] must be a string or a { name, schema } mapping`);
+  });
+}
 
 export class DefError extends Error {}
 
@@ -114,11 +153,13 @@ export function buildDef(raw: unknown, source?: string): WorkflowDef {
   const inputs: InputDef[] = (Array.isArray(r.inputs) ? r.inputs : []).map((ri, i) => {
     const raw = ri as RawInput;
     const inName = asString(raw.name, `inputs[${i}].name`);
-    return {
+    const input: InputDef = {
       name: inName,
       producer: raw.producer === undefined ? 'human' : asString(raw.producer, `inputs[${i}].producer`),
       seedOwed: asBool(raw.seedOwed, false, `inputs[${i}].seedOwed`),
     };
+    if (raw.schema !== undefined) input.schema = asSchema(raw.schema, `input '${inName}'.schema`);
+    return input;
   });
 
   if (!Array.isArray(r.loops) || r.loops.length === 0) {
@@ -147,7 +188,7 @@ export function parseDef(raw: unknown, source?: string): WorkflowDef {
 function buildLoop(rl: RawLoop, i: number): LoopDef {
   const name = asString(rl.name, `loops[${i}].name`);
   const consumes = asStringArray(rl.consumes, `loop '${name}'.consumes`).map(parseConsume);
-  const produces = asStringArray(rl.produces, `loop '${name}'.produces`).map(parseProduce);
+  const produces = parseProduces(rl.produces, `loop '${name}'.produces`);
   const cadence = rl.cadence === undefined ? DEFAULTS.cadence : asString(rl.cadence, `loop '${name}'.cadence`);
   const loop: LoopDef = {
     name,
@@ -161,6 +202,7 @@ function buildLoop(rl: RawLoop, i: number): LoopDef {
     maxRunsPerDay: asNumber(rl.maxRunsPerDay, DEFAULTS.maxRunsPerDay, `loop '${name}'.maxRunsPerDay`),
     parallel: asNumber(rl.parallel, DEFAULTS.parallel, `loop '${name}'.parallel`),
     maxAttempts: asNumber(rl.maxAttempts, DEFAULTS.maxAttempts, `loop '${name}'.maxAttempts`),
+    maxSchemaFailures: asNumber(rl.maxSchemaFailures, DEFAULTS.maxSchemaFailures, `loop '${name}'.maxSchemaFailures`),
     workdir: rl.workdir === undefined ? DEFAULTS.workdir : asString(rl.workdir, `loop '${name}'.workdir`),
     body: rl.body === undefined ? '' : asString(rl.body, `loop '${name}'.body`),
   };

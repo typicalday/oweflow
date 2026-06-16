@@ -14,6 +14,7 @@ export interface LoopSpec {
   maxRunsPerDay?: number;
   parallel?: number;
   maxAttempts?: number;
+  maxSchemaFailures?: number;
   model?: string;
   workdir?: string;
   body?: string;
@@ -32,6 +33,7 @@ export function loop(spec: LoopSpec): LoopDef {
     maxRunsPerDay: spec.maxRunsPerDay ?? 1000,
     parallel: spec.parallel ?? 100,
     maxAttempts: spec.maxAttempts ?? 3,
+    maxSchemaFailures: spec.maxSchemaFailures ?? 5,
     ...(spec.model !== undefined ? { model: spec.model } : {}),
     workdir: spec.workdir ?? 'main',
     body: spec.body ?? `run ${spec.name}`,
@@ -60,6 +62,7 @@ export function arts(
       version: s.version ?? 0,
       reasons: s.reasons ?? [],
       judgmentRejects: s.judgmentRejects ?? 0,
+      schemaRejects: s.schemaRejects ?? 0,
       ...(s.value !== undefined ? { value: s.value } : {}),
       ...(s.fingerprint !== undefined ? { fingerprint: s.fingerprint } : {}),
       ...(s.sealOf !== undefined ? { sealOf: s.sealOf } : {}),
