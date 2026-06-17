@@ -432,6 +432,24 @@ test('concurrency: a stale commit is born-rejected when its input moved mid-run'
   assert.equal(engine.green(wf, builder2.run, 'pr', { built: 'on v2' }).outcome, 'green');
 });
 
+test('concurrency: a born-rejected (CAS-stale) run auto-releases its lease — next tick mints a fresh run with the current input version', () => {
+  const { engine, store } = makeEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+  const builder = fire(engine, wf, 'builder', 2000);
+  assert.deepEqual(builder.consumes, { plan: { plan: 'v1' } });
+  engine.reject(wf, 'plan', 'human', 'pivot');
+  complete(engine, wf, fire(engine, wf, 'planner', 2500), { plan: 'v2' });
+  const res = engine.green(wf, builder.run, 'pr', { built: 'on v1' });
+  assert.equal(res.outcome, 'born-rejected');
+  assert.equal(store.getRun(builder.run)?.outcome, 'no_work', 'born-reject auto-closes the run');
+  assert.equal(store.getTask(wf, 'builder', '')?.status, 'idle', 'born-reject re-arms the task');
+  const builder2 = fire(engine, wf, 'builder', 3000);          // NO manual close()
+  assert.notEqual(builder2.run, builder.run, 'fresh run id on next tick');
+  assert.deepEqual(builder2.consumes, { plan: { plan: 'v2' } });
+  assert.equal(engine.green(wf, builder2.run, 'pr', { built: 'on v2' }).outcome, 'green');
+});
+
 test('a reaped run cannot commit (lease check)', () => {
   const { engine } = makeEngine([delivery], { reapTtlMs: 100 });
   const wf = engine.createInstance('delivery');

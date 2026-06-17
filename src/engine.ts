@@ -387,6 +387,7 @@ export class Engine {
       const cas = this.casCheck(arts, req, r.fingerprint ?? {});
       if (cas.moved) {
         this.bornReject(art, cas.moved);
+        this.releaseLeaseOnBornReject(workflow, run);
         this.settle(workflow, def);
         return { path, outcome: 'born-rejected', reason: cas.reason };
       }
@@ -428,6 +429,9 @@ export class Engine {
       return { path, outcome: 'green' };
     });
     this.fire({ type: 'commit', workflow, run, path: result.path, action: 'green', outcome: result.outcome });
+    if (result.outcome === 'born-rejected') {
+      this.fire({ type: 'closed', workflow, run, outcome: 'no_work' });
+    }
     this.fireSettled(workflow);
     return result;
   }
@@ -453,6 +457,7 @@ export class Engine {
       if (cas.moved) {
         const seal = arts.get(sealPath(stem));
         if (seal) this.bornReject(seal, cas.moved);
+        this.releaseLeaseOnBornReject(workflow, run);
         this.settle(workflow, def);
         return { outcome: 'born-rejected', created: [], reason: cas.reason };
       }
@@ -508,6 +513,9 @@ export class Engine {
       return { outcome: 'emitted', created };
     });
     this.fire({ type: 'commit', workflow, run, path: stem, action: 'emit', outcome: result.outcome });
+    if (result.outcome === 'born-rejected') {
+      this.fire({ type: 'closed', workflow, run, outcome: 'no_work' });
+    }
     this.fireSettled(workflow);
     return result;
   }
@@ -529,6 +537,7 @@ export class Engine {
       const cas = this.casCheck(arts, req, r.fingerprint ?? {});
       if (cas.moved) {
         this.bornReject(sealArt, cas.moved);
+        this.releaseLeaseOnBornReject(workflow, run);
         this.settle(workflow, def);
         return { path: sealP, outcome: 'born-rejected', reason: cas.reason };
       }
@@ -543,6 +552,9 @@ export class Engine {
       return { path: sealP, outcome: 'green' };
     });
     this.fire({ type: 'commit', workflow, run, path: result.path, action: 'seal', outcome: result.outcome });
+    if (result.outcome === 'born-rejected') {
+      this.fire({ type: 'closed', workflow, run, outcome: 'no_work' });
+    }
     this.fireSettled(workflow);
     return result;
   }
@@ -784,6 +796,24 @@ export class Engine {
       acceptance,
       reasons: [...art.reasons, reason(action, 'structural', 'engine', op.reason, art.version)],
     });
+  }
+
+  /**
+   * §12.2 born-reject lease release: close the run (`no_work`) and re-arm its
+   * task to `idle` so the firing is immediately re-claimable next tick. Runs
+   * inside the caller's open tx (plain store write, no nested tx). Unlike reap()
+   * it does NOT bump attempts — a CAS-stale born-reject is not lease churn. The
+   * `closed` event is fired by the caller AFTER the tx commits (post-commit
+   * ordering), matching public close().
+   */
+  private releaseLeaseOnBornReject(workflow: string, run: string): void {
+    this.store.updateRun(run, { outcome: 'no_work' });
+    const r = this.store.getRun(run);
+    if (!r) return;
+    const task = this.store.getTask(workflow, r.loop, r.key ?? '');
+    if (task && task.status === 'claimed' && task.run === run) {
+      this.store.putTask({ workflow, loop: r.loop, key: r.key ?? '', status: 'idle', attempts: task.attempts });
+    }
   }
 
   private bornReject(art: ArtifactData, movedPath: string): void {
