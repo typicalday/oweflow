@@ -304,6 +304,10 @@ loops:
     body: |                    # prompt; ${WORKFLOW} ${RUN} ${INDEX} are substituted
       Read the proposal and produce a `plan`.
 
+    generates:                 # optional; outputs this loop intentionally makes but
+      - audit_log              #   NO consumer is expected. Lint-exempt from dead-end
+      - report[]               #   warnings. Engine behavior identical to produces:.
+
     # all optional, with defaults:
     maxAttempts: 3             # judgment-reject cap before the output stalls (§6)
     maxSchemaFailures: 5       # schema-reject cap before the output stalls (§18); 0 = off
@@ -317,6 +321,14 @@ loops:
     model: …                   # opaque hint passed through on the order
     workdir: main              # opaque hint passed through on the order
 ```
+
+### `produces:` vs `generates:`
+
+A stem under `produces:` is expected to be consumed downstream; oweflow lint warns if it
+isn't. A stem under `generates:` is intentionally consumed by nothing (an audit log, an
+external artifact, or a dev-branch stub); lint leaves it alone. Generated artifacts are
+identical to produced ones in every other respect: schema-validated, fingerprinted,
+greenable, and visible in `status`/`show`/`trace`/`graph`.
 
 ### Consume / produce grammar
 

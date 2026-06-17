@@ -596,3 +596,226 @@ test('buildDef: nested not/all predicate round-trips (deep-equal)', () => {
     },
   });
 });
+
+// ---- generates: key tests -------------------------------------------------------
+
+// A minimal workflow fixture for generates: tests
+const baseWithGenerates = {
+  name: 'audited',
+  inputs: [{ name: 'proposal' }],
+  loops: [
+    {
+      name: 'planner',
+      consumes: ['proposal'],
+      produces: ['plan'],
+      generates: ['audit_log'],
+      body: 'plan it',
+    },
+    { name: 'builder', consumes: ['plan'], produces: ['final'], terminal: true },
+  ],
+};
+
+// Test 1: generates: bare strings parse like produces; stem unioned into loop.produces
+test('generates: bare string parses like produces; stem is in loop.generates and loop.produces', () => {
+  const d = buildDef(baseWithGenerates);
+  const planner = d.loops[0]!;
+  assert.ok(planner.generates !== undefined, 'generates should be set');
+  assert.equal(planner.generates![0]!.stem, 'audit_log');
+  // unioned into produces
+  assert.ok(planner.produces.some((p) => p.stem === 'audit_log'), 'audit_log should be in produces');
+  // produces-only also present
+  assert.ok(planner.produces.some((p) => p.stem === 'plan'), 'plan should be in produces');
+  assert.equal(planner.produces.length, 2); // plan + audit_log
+});
+
+// Test 2: generates: [{name, schema}] attaches a schema
+test('generates: { name, schema } attaches a schema to the ProducePattern', () => {
+  const d = buildDef({
+    name: 'schemagen',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'gen',
+        consumes: ['q'],
+        generates: [{ name: 'report', schema: { type: 'object' } }],
+        terminal: true,
+        body: '',
+      },
+    ],
+  });
+  const g = d.loops[0]!.generates![0]!;
+  assert.equal(g.stem, 'report');
+  assert.deepEqual(g.schema, { type: 'object' });
+});
+
+// Test 3: generates: ['audit.log[]'] parses as collection kind
+test('generates: collection pattern parses as collection kind', () => {
+  const d = buildDef({
+    name: 'collgen',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'gen',
+        consumes: ['q'],
+        generates: ['audit.log[]'],
+        terminal: true,
+        body: '',
+      },
+    ],
+  });
+  const g = d.loops[0]!.generates![0]!;
+  assert.equal(g.kind, 'collection');
+  assert.equal(g.stem, 'audit.log');
+});
+
+// Test 4: generates: [] leaves loop.generates absent
+test('generates: empty array leaves loop.generates unset', () => {
+  const d = buildDef({
+    name: 'emptygens',
+    inputs: [{ name: 'q' }],
+    loops: [
+      { name: 'a', consumes: ['q'], generates: [], produces: ['out'], terminal: true },
+    ],
+  });
+  assert.ok(d.loops[0]!.generates === undefined, 'generates should be absent for empty array');
+});
+
+// Test 5: generates: invalid entry throws DefError
+test('generates: invalid entry (non-string/non-object) throws DefError', () => {
+  assert.throws(
+    () => buildDef({
+      name: 'bad',
+      inputs: [{ name: 'q' }],
+      loops: [{ name: 'a', consumes: ['q'], generates: [42], terminal: true }],
+    }),
+    (e: unknown) => e instanceof DefError && /must be a string or a \{ name, schema \} mapping/.test((e as Error).message),
+  );
+});
+
+// Test 6: same stem in both produces: and generates: → hard error mentioning "produces: and generates:"
+test('validateDef: same stem in both produces: and generates: → hard error', () => {
+  const errors = validateDef(buildDef({
+    name: 'conflict',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'gen',
+        consumes: ['q'],
+        produces: ['audit_log'],
+        generates: ['audit_log'],
+        terminal: true,
+      },
+    ],
+  }));
+  assert.ok(
+    errors.some((e) => e.includes("produces: and generates:")),
+    `expected same-stem-in-both error; got: ${errors.join('; ')}`,
+  );
+});
+
+// Test 7: two loops generating the same stem → one-writer error
+test('validateDef: two loops generating the same stem → one-writer error', () => {
+  const errors = validateDef(buildDef({
+    name: 'twogens',
+    inputs: [{ name: 'q' }],
+    loops: [
+      { name: 'a', consumes: ['q'], generates: ['audit_log'], produces: ['out_a'], terminal: true },
+      { name: 'b', consumes: ['q'], generates: ['audit_log'], produces: ['out_b'], terminal: true },
+    ],
+  }));
+  assert.ok(
+    errors.some((e) => e.includes('two producers') && e.includes('audit_log')),
+    `expected one-writer error for audit_log; got: ${errors.join('; ')}`,
+  );
+});
+
+// Test 8: generates: map output without a map consume → map-shape error
+test('validateDef: generates map output without a map consume → map-shape error', () => {
+  const errors = validateDef(buildDef({
+    name: 'badmapgen',
+    inputs: [{ name: 'q' }],
+    loops: [
+      // A non-map loop that generates a per-element output — not allowed
+      { name: 'a', consumes: ['q'], generates: ['col[$i].check'], produces: ['out'], terminal: true },
+    ],
+  }));
+  assert.ok(
+    errors.some((e) => /no map \(\$i\) consume to bind it/.test(e)),
+    `expected map-shape error; got: ${errors.join('; ')}`,
+  );
+});
+
+// Test 9: a generated unconsumed stem yields NO dead-end warning
+test('lintDef: a generated unconsumed stem yields no dead-end warning', () => {
+  const { errors, warnings } = lintDef(buildDef(baseWithGenerates));
+  assert.deepEqual(errors, []);
+  // audit_log is generated and unconsumed — no warning for it
+  assert.ok(
+    !warnings.some((w) => w.includes('audit_log')),
+    `unexpected warning for audit_log; got: ${warnings.join('; ')}`,
+  );
+});
+
+// Test 10: a produced unconsumed stem on the same loop still warns while the generated one does not
+test('lintDef: produced unconsumed stem still warns on same loop as generates:', () => {
+  const { errors, warnings } = lintDef(buildDef({
+    name: 'mixed-orphan',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'gen',
+        consumes: ['q'],
+        produces: ['plan', 'orphan'],   // orphan: produced but not consumed
+        generates: ['audit_log'],       // audit_log: generated, no consumer expected
+        body: '',
+      },
+      { name: 'use', consumes: ['plan'], produces: ['final'], terminal: true },
+    ],
+  }));
+  assert.deepEqual(errors, []);
+  // 'orphan' is produced (not generated) and unconsumed → should warn
+  assert.ok(
+    warnings.some((w) => w.includes("'orphan'")),
+    `expected warning for orphan; got: ${warnings.join('; ')}`,
+  );
+  // 'audit_log' is generated (unconsumed but exempt) → should NOT warn
+  assert.ok(
+    !warnings.some((w) => w.includes('audit_log')),
+    `unexpected warning for audit_log; got: ${warnings.join('; ')}`,
+  );
+});
+
+// Test 11: the dead-end warning message references `generates:`
+test('lintDef: dead-end warning message mentions generates:', () => {
+  const { warnings } = lintDef(buildDef({
+    name: 'warnmsg',
+    inputs: [{ name: 'q' }],
+    loops: [
+      { name: 'a', consumes: ['q'], produces: ['orphan'], body: '' },
+      { name: 'b', consumes: ['q'], produces: ['final'], terminal: true },
+    ],
+  }));
+  assert.ok(
+    warnings.some((w) => /generates:/.test(w)),
+    `expected warning mentioning generates:; got: ${warnings.join('; ')}`,
+  );
+});
+
+// Test 12: terminal: true still suppresses everything (generates is additive)
+test('lintDef: terminal: true suppresses all dead-end warnings even when generates: is also set', () => {
+  const { warnings } = lintDef(buildDef({
+    name: 'terminal-gen',
+    inputs: [{ name: 'q' }],
+    loops: [
+      {
+        name: 'a',
+        consumes: ['q'],
+        produces: ['final', 'extra'],
+        generates: ['audit_log'],
+        terminal: true,
+        body: '',
+      },
+    ],
+  }));
+  assert.deepEqual(warnings, []);
+});

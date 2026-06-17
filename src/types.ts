@@ -144,6 +144,9 @@ export interface LoopDef {
   name: string;
   consumes: ConsumePattern[];
   produces: ProducePattern[];
+  /** Artifacts this loop generates that are intentionally NOT consumed downstream.
+   *  Lint-exempt from dead-end warnings. Unioned into `produces` at def-build time. */
+  generates?: ProducePattern[];
   /** input names this loop has authority to invalidate (defaults to its consumed stems) */
   invalidates: string[];
   cadence: string; // e.g. "30m"

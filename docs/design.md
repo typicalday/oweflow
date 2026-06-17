@@ -135,6 +135,28 @@ order-independent — re-running `settle()` on a healthy graph yields no ops.
   the one place the level-trigger is deliberately overridden, because the side
   effect cannot be taken back.
 
+## §16 Generated outputs (`generates:`)
+
+A loop may declare outputs it intentionally makes without any downstream consumer — audit
+logs, external exports, dev-branch stubs — under `generates:`. The behavioral contract:
+
+- **To the engine:** generated patterns are unioned into `produces` at def-build time.
+  Every engine function (`pendingOwed`, `eligibleFirings`, `plainOutputs`, `buildTrace`,
+  `buildGraph`, schema validation, the one-writer rule) treats them identically to
+  declared-in-produces patterns. A generated artifact is schema-validated, fingerprinted,
+  greenable, and visible in `status`/`show`/`trace`/`graph` — indistinguishable from a
+  produced one.
+- **To the linter only:** `deadEndWarnings` skips stems declared in `generates:`. A stem
+  in `produces:` (not `generates:`) that nothing consumes still warns. The `generates:`
+  field is the *only* place the engine consults to decide lint exemption.
+- **`terminal:` vs `generates:`:** `terminal: true` marks a whole loop as an intended
+  sink and suppresses ALL dead-end warnings for it. `generates:` is more granular — it
+  exempts specific output stems while leaving other outputs on the same loop subject to the
+  normal dead-end check.
+- **Validation:** a stem listed in both `produces:` and `generates:` on the same loop is a
+  hard error. Two loops generating the same stem is a one-writer error (the same rule that
+  applies to `produces:`).
+
 ## §17 Derived status
 
 `workflowStatus` is computed from artifact state on every call and never stored:

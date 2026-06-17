@@ -45,6 +45,7 @@ interface RawLoop {
   name?: unknown;
   consumes?: unknown;
   produces?: unknown;
+  generates?: unknown;
   invalidates?: unknown;
   cadence?: unknown;
   maxRunsPerDay?: unknown;
@@ -272,12 +273,13 @@ export function parseDef(raw: unknown, source?: string): WorkflowDef {
 function buildLoop(rl: RawLoop, i: number): LoopDef {
   const name = asString(rl.name, `loops[${i}].name`);
   const consumes = asStringArray(rl.consumes, `loop '${name}'.consumes`).map(parseConsume);
-  const produces = parseProduces(rl.produces, `loop '${name}'.produces`);
+  const producesPatterns = parseProduces(rl.produces, `loop '${name}'.produces`);
+  const generatesPatterns = parseProduces(rl.generates, `loop '${name}'.generates`);
   const cadence = rl.cadence === undefined ? DEFAULTS.cadence : asString(rl.cadence, `loop '${name}'.cadence`);
   const loop: LoopDef = {
     name,
     consumes,
-    produces,
+    produces: [...producesPatterns, ...generatesPatterns], // engine reads this unified array
     invalidates: rl.invalidates === undefined
       ? consumes.map((c) => c.stem)
       : asStringArray(rl.invalidates, `loop '${name}'.invalidates`),
@@ -292,6 +294,7 @@ function buildLoop(rl: RawLoop, i: number): LoopDef {
   };
   if (rl.model !== undefined) loop.model = asString(rl.model, `loop '${name}'.model`);
   if (asBool(rl.terminal, false, `loop '${name}'.terminal`)) loop.terminal = true;
+  if (generatesPatterns.length > 0) loop.generates = generatesPatterns; // kept for lint only
   return loop;
 }
 
@@ -349,6 +352,20 @@ export function validateDef(def: WorkflowDef): string[] {
     }
     if (l.produces.some((p) => p.kind === 'map') && !maps.length) {
       errors.push(`loop '${l.name}' produces a per-element output but has no map (\$i) consume to bind it`);
+    }
+  }
+
+  // same stem in both produces: and generates: on the same loop is a hard error
+  for (const l of def.loops) {
+    if (!l.generates || l.generates.length === 0) continue;
+    const generatedStems = new Set(l.generates.map((p) => p.stem));
+    // produces-only patterns are those NOT in generates (using object identity since generates
+    // patterns are the same ProducePattern objects we unioned into produces)
+    const producesOnly = l.produces.filter((p) => !l.generates!.includes(p));
+    for (const p of producesOnly) {
+      if (generatedStems.has(p.stem)) {
+        errors.push(`loop '${l.name}': stem '${p.stem}' appears in both produces: and generates: (remove it from one)`);
+      }
     }
   }
 
@@ -502,12 +519,16 @@ function reachabilityErrors(
  * Returns warning strings for any singleton or collection stem that nothing
  * consumes, on a non-terminal loop. Map outputs are excluded (they are
  * per-element children, not consumed as top-level stems). Terminal loops are
- * explicitly intended sinks.
+ * explicitly intended sinks. Stems declared under generates: are exempt.
  */
 function deadEndWarnings(def: WorkflowDef): string[] {
   // all stems consumed by any loop
   const consumed = new Set<string>(
     def.loops.flatMap((l) => l.consumes.map((c) => c.stem)),
+  );
+  // stems declared under generates: are intentionally unconsumed — lint-exempt
+  const generatedStems = new Set<string>(
+    def.loops.flatMap((l) => (l.generates ?? []).map((p) => p.stem)),
   );
 
   const warnings: string[] = [];
@@ -515,9 +536,12 @@ function deadEndWarnings(def: WorkflowDef): string[] {
     if (l.terminal) continue; // terminal loops are intended sinks
     for (const p of l.produces) {
       if (p.kind === 'map') continue; // per-element outputs are not top-level stems
+      if (generatedStems.has(p.stem)) continue; // generates: exempt
       if (!consumed.has(p.stem)) {
         warnings.push(
-          `loop '${l.name}' produces '${p.stem}' but nothing consumes it (dead-end output; mark the loop terminal: true if this is an intended sink)`,
+          `loop '${l.name}' produces '${p.stem}' but nothing consumes it ` +
+          `(dead-end output; declare it under generates: if no consumer is expected, ` +
+          `or mark the loop terminal: true if this is an intended sink)`,
         );
       }
     }
