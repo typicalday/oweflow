@@ -1116,6 +1116,14 @@ export function loadDefs(dir: string): Map<string, WorkflowDef> {
           throw new DefError(`calls '${l.name}' maps input '${k}' which workflow '${l.calls}' does not declare`);
         }
       }
+      // M2B-OUTCOME v1: the called workflow must declare exactly one output.
+      const childOutputs = childDef.outputs ?? [];
+      if (childOutputs.length === 0) {
+        throw new DefError(`calls names workflow '${l.calls}' which declares no outputs:`);
+      }
+      if (childOutputs.length > 1) {
+        throw new DefError(`calls names workflow '${l.calls}' which declares ${childOutputs.length} outputs:, calls: v1 requires exactly one`);
+      }
     }
 
     const errors = validateDef(expanded);

@@ -1344,6 +1344,7 @@ test('detectCallsCycles: A calls B calls A errors with cycle message', () => {
       join(dir, 'a.yaml'),
       [
         'name: a',
+        'outputs: [result]',
         'loops:',
         '  - name: delegate',
         '    calls: b',
@@ -1354,6 +1355,7 @@ test('detectCallsCycles: A calls B calls A errors with cycle message', () => {
       join(dir, 'b.yaml'),
       [
         'name: b',
+        'outputs: [result]',
         'loops:',
         '  - name: delegate',
         '    calls: a',
@@ -1383,6 +1385,7 @@ test('detectCallsCycles: A calls B (acyclic) passes without error', () => {
       join(dir, 'b.yaml'),
       [
         'name: b',
+        'outputs: [result]',
         'loops:',
         '  - name: worker',
         '    produces: [result]',
@@ -1416,11 +1419,11 @@ test('include cycle and calls cycle are detected independently', () => {
   try {
     writeFileSync(
       join(callsDir, 'a.yaml'),
-      ['name: a', 'loops:', '  - name: d', '    calls: b', '    produces: [r]'].join('\n'),
+      ['name: a', 'outputs: [r]', 'loops:', '  - name: d', '    calls: b', '    produces: [r]'].join('\n'),
     );
     writeFileSync(
       join(callsDir, 'b.yaml'),
-      ['name: b', 'loops:', '  - name: d', '    calls: a', '    produces: [r]'].join('\n'),
+      ['name: b', 'outputs: [r]', 'loops:', '  - name: d', '    calls: a', '    produces: [r]'].join('\n'),
     );
     let callsCycleErr: Error | undefined;
     try { loadDefs(callsDir); } catch (e) { callsCycleErr = e as Error; }

@@ -18,6 +18,7 @@
 name: delivery
 title: Software delivery
 description: Plan → build → review → merge, with reviewer knock-backs.
+outputs: [merge]
 
 inputs:
   - name: proposal          # required: the workflow stays blocked until supplied

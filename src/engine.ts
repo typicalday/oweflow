@@ -167,6 +167,8 @@ export class Engine {
   private readonly reapTtlMs: number;
   private readonly listeners = new Set<EngineListener>();
   private readonly onListenerError?: (err: unknown, event: EngineEvent) => void;
+  /** M2B: recursion guard — set of parentWf ids currently inside maintainCalls. */
+  private readonly _inMaintainCalls = new Set<string>();
 
   constructor(
     store: Store,
@@ -270,11 +272,149 @@ export class Engine {
     this.fireSettled(workflow);
   }
 
+  // ---- Mode 2 calls: child-instance management --------------------------------
+
+  /**
+   * M2B: Maintain all `calls:` loops for a parent workflow.
+   * Called at the top of tick (outside any tx) and as cascade-up prompt.
+   * For each calls: loop: spawn the child if gate is ready and no child exists;
+   * re-attach if it exists; re-provide if parent inputs moved; machine-green
+   * the parent artifact when the child's declared output is green.
+   */
+  private maintainCalls(parentWf: string, def: WorkflowDef, now?: number): void {
+    if (this._inMaintainCalls.has(parentWf)) return;
+    this._inMaintainCalls.add(parentWf);
+    try {
+      for (const loop of def.loops) {
+        if (!loop.calls) continue;
+
+        // STEP 1 — Gather gate stems and check gate readiness.
+        const callsStem = loop.produces[0]!.stem; // single produced artifact name
+        const callsPath = callsStem;
+        const gateStems = Object.values(loop.callsInputs ?? {});
+        const parentArts = this.artMap(parentWf);
+        const gateReady = gateStems.length === 0 || gateStems.every((s) => isGreen(parentArts.get(s)));
+        if (!gateReady) continue;
+
+        // STEP 2 — Look up any existing child via reverse index.
+        let existingChild = this.store.findChildByParent(parentWf, callsPath);
+
+        // STEP 3 — SPAWN or RE-ATTACH.
+        if (!existingChild) {
+          // SPAWN: gate is ready and no child exists yet.
+          const seedProvide: Record<string, Record<string, unknown>> = {};
+          for (const [childInputName, parentArtifactName] of Object.entries(loop.callsInputs ?? {})) {
+            const parentArt = parentArts.get(parentArtifactName);
+            if (parentArt?.value !== undefined) seedProvide[childInputName] = parentArt.value;
+          }
+          const childId = this.createInstance(loop.calls, {
+            producedBy: { parentWf, parentPath: callsPath },
+            provide: seedProvide,
+          });
+          existingChild = this.store.getWorkflow(childId);
+        }
+        // else: RE-ATTACH — existingChild is the already-spawned child; no new spawn.
+
+        if (!existingChild) continue; // defensive: createInstance returned but getWorkflow failed
+
+        // STEP 4 — Read child's declared outcome artifact.
+        const childDef = this.resolveDef(existingChild.def);
+        const childOutcomeStem = childDef.outputs![0]!; // validated by Phase-2 check
+        let childArts = this.artMap(existingChild.id);
+        let childOutcomeArt = childArts.get(childOutcomeStem);
+
+        // STEP 5 — RE-PROVIDE if parent gate source moved (M2B-REPROVIDE).
+        for (const [childInputName, parentArtifactName] of Object.entries(loop.callsInputs ?? {})) {
+          const parentArtNow = parentArts.get(parentArtifactName);
+          const childInputArt = childArts.get(childInputName);
+          if (parentArtNow?.value !== undefined && !deepEqual(parentArtNow.value, childInputArt?.value)) {
+            this.provideInput(existingChild.id, childInputName, parentArtNow.value as Record<string, unknown>);
+          }
+        }
+
+        // STEP 6 — MACHINE-GREEN or STAY OWED (M2B-CASCADEUP).
+        // Re-read after potential re-provide.
+        childArts = this.artMap(existingChild.id);
+        childOutcomeArt = childArts.get(childOutcomeStem);
+        const parentCallsArt = this.store.getArtifact(parentWf, callsStem);
+
+        if (isGreen(childOutcomeArt) && childOutcomeArt?.value !== undefined) {
+          const alreadyGreen = isGreen(parentCallsArt);
+          const sameValue = alreadyGreen && deepEqual(childOutcomeArt.value, parentCallsArt?.value);
+          if (!alreadyGreen || !sameValue) {
+            if (!parentCallsArt) continue; // not yet materialized by pendingOwed — skip
+            const gateArts = this.artMap(parentWf);
+            const fp = computeFingerprint(gateArts, gateStems);
+            const next: ArtifactData = {
+              ...parentCallsArt,
+              acceptance: 'green',
+              version: parentCallsArt.version + 1,
+              value: childOutcomeArt.value,
+              fingerprint: fp,
+            };
+            // Do NOT set terminal: calls: artifact must be re-armable if gate inputs move.
+            this.store.tx(() => {
+              this.store.putArtifact({ ...next, workflow: parentWf });
+              this.settle(parentWf, def, now);
+            });
+            this.fire({ type: 'commit', workflow: parentWf, path: callsStem, action: 'provide' });
+            this.fireSettled(parentWf);
+          }
+        } else if (!isGreen(childOutcomeArt) && isGreen(parentCallsArt) && parentCallsArt) {
+          // M2B-REARM: child's outcome is no longer green (e.g. re-provide re-armed it)
+          // but the parent calls: artifact is still green. Re-arm it to owed so downstream
+          // re-runs when the child completes again. This handles gate re-arm (test f):
+          // the cascade can't detect this because deliver loop has consumes: [].
+          this.store.tx(() => {
+            const artNow = this.store.getArtifact(parentWf, callsStem);
+            if (!artNow || !isGreen(artNow)) return; // already re-armed or gone
+            this.store.putArtifact({
+              ...artNow,
+              acceptance: 'owed',
+              reasons: [...artNow.reasons, {
+                at: Date.now(),
+                action: 'reopen' as const,
+                kind: 'structural' as const,
+                by: 'engine' as const,
+                text: 'gate input moved: child re-running',
+                fromVersion: artNow.version,
+              }],
+            });
+            this.settle(parentWf, def, now);
+          });
+          this.fire({ type: 'commit', workflow: parentWf, path: callsStem, action: 'retry' });
+          this.fireSettled(parentWf);
+        }
+      }
+    } finally {
+      this._inMaintainCalls.delete(parentWf);
+    }
+  }
+
+  /**
+   * M2B cascade-up prompt: if `workflow` has a producedBy link, trigger
+   * maintainCalls on its parent so the parent reflects the child's progress promptly.
+   * Called after child commits (green, close) — outside any open tx.
+   */
+  private triggerParentIfChild(workflow: string): void {
+    const wfRow = this.store.getWorkflow(workflow);
+    if (!wfRow?.producedBy) return;
+    const { parentWf } = wfRow.producedBy;
+    if (this._inMaintainCalls.has(parentWf)) return;
+    const parentWfRow = this.store.getWorkflow(parentWf);
+    if (!parentWfRow) return;
+    const parentDef = this.resolveDef(parentWfRow.def);
+    this.maintainCalls(parentWf, parentDef);
+    this.fireSettled(parentWf);
+  }
+
   // ---- the tick (maintain → reap → eligible → cadence/budget → claim) --------
 
   tick(workflow: string, opts: { now?: number } = {}): TickResult {
     const def = this.defFor(workflow);
     const now = opts.now ?? nowMs();
+    // M2B: maintain calls: child instances before the normal tick/reap/claim cycle.
+    this.maintainCalls(workflow, def, now);
     return this.store.tx(() => {
       this.settle(workflow, def, now);
       const reaped = this.reap(workflow, now);
@@ -507,6 +647,8 @@ export class Engine {
       this.fire({ type: 'closed', workflow, run, outcome: 'no_work' });
     }
     this.fireSettled(workflow);
+    // M2B cascade-up prompt: if this workflow has a producedBy link, trigger parent maintainCalls.
+    this.triggerParentIfChild(workflow);
     return result;
   }
 
@@ -741,6 +883,8 @@ export class Engine {
     // Closing releases a lease; it touches no artifact state, so there is no
     // forward cascade and no `settled` to derive — just the lifecycle signal.
     this.fire({ type: 'closed', workflow, run, outcome });
+    // M2B cascade-up prompt: closing a run may advance the child's artifact state.
+    this.triggerParentIfChild(workflow);
   }
 
   /** Release stranded leases (claimed by a dead/closed run, or past the TTL). */
@@ -1165,4 +1309,9 @@ function nextIndex(arts: ArtifactMap, stem: string): number {
 
 function substitute(body: string, vars: Record<string, string>): string {
   return body.replace(/\$\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] ?? '' : m));
+}
+
+/** M2B: deep-equal via JSON serialization (plain JSON objects only — no undefined/functions). */
+function deepEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }

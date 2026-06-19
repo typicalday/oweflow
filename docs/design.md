@@ -465,10 +465,44 @@ This check is **separate** from the include-cycle guard in `expandIncludes` (§2
 
 `CreateOpts` gains `producedBy?: { parentWf: string; parentPath: string }`. When present, `createInstance` passes it to `insertWorkflow`, which stores both columns. No other behavior changes in PR5a — the field is wired end-to-end (store → engine → opts) so PR5b can call `createInstance({ producedBy })` without touching those layers.
 
-### §23.6 PR5b will add
+### §23.6 Runtime cascade-up (PR5b)
 
-- **Spawn-on-eligible**: when a `calls:` loop's parent inputs are ready, the engine creates the child instance (via `createInstance` with `producedBy`).
-- **Cross-boundary outcome read**: after each child tick, the engine checks the child's declared `outcome` artifact; if green, it greens the parent's calls: artifact (cascade-up).
-- **Machine-green**: the cascade-up is engine-internal (never an event bus) and durable via the persisted `producedBy` link.
-- **Re-attach-on-reap**: if a child run is reaped, the engine re-attaches via `findChildByParent`.
-- **Re-provide-on-input-move**: if a mapped parent artifact is invalidated, the engine re-provides it to the child.
+PR5b ships `maintainCalls` in `engine.ts` — the engine-internal method that drives the calls: lifecycle. All cross-instance behavior lives in the engine only; `model.ts` stays pure single-instance.
+
+#### §23.6.1 `maintainCalls` algorithm
+
+Called at the top of every parent `tick` (outside any transaction) and as a cascade-up prompt after child progress. For each `calls:` loop in the parent def:
+
+1. **Gate check**: `gateStems = Object.values(callsInputs)` (parent artifact names wired to child inputs). Gate is ready when every gate stem is green.
+2. **Re-attach guard**: `findChildByParent(parentWf, callsPath)` — spawn only when no child exists (`undefined`). This prevents duplicate children across crashes and re-ticks.
+3. **Spawn**: if gate is ready and no child, `createInstance(loop.calls, { producedBy, provide: gateValues })`. The parent calls: artifact stays `owed`.
+4. **Outcome read**: read the child's declared `outputs:` artifact (exactly one, validated at load time). If it is green, machine-green the parent's calls: artifact.
+5. **Re-provide**: for each `callsInputs` mapping, if the parent's value differs (deep-equal) from what the child holds, `provideInput(child, inputName, newValue)`. The child re-runs internally.
+6. **Machine-green**: set parent calls: artifact to `acceptance: 'green'`, `version + 1`, `value = child outcome value`, `fingerprint = computeFingerprint(parentArts, gateStems)`. Then `settle(parentWf)` so downstream (teardown) fires. Do NOT set `terminal` — the calls: artifact must be re-armable if gate inputs move.
+7. **Re-arm on child working**: if the child's outcome is no longer green (e.g. re-provide re-armed it) but the parent calls: artifact is green, re-arm the parent calls: artifact to `owed`. This handles gate re-arm correctly even though `deliver` loop has `consumes: []` (the pure cascade cannot detect fingerprint mismatch for calls: loops).
+
+#### §23.6.2 Cascade-up prompt
+
+After a child `green` or `close`, `triggerParentIfChild(childWf)` reads the child's `producedBy` link and calls `maintainCalls(parentWf)`. This propagates the child's outcome to the parent immediately, instead of waiting for the next scheduled tick. Durability is free regardless: even without the prompt, the next parent tick calls `maintainCalls` and reads the persisted child outcome. The recursion guard (`_inMaintainCalls: Set<string>`) prevents `maintainCalls → provideInput → fireSettled → triggerParentIfChild → maintainCalls` infinite loops.
+
+#### §23.6.3 `outputs:` as embedding interface
+
+A workflow that can be called via `calls:` must declare exactly one `outputs:` stem (validated at `loadDefs` Phase 2). The called workflow's `outputs:[0]` is the artifact whose value is reflected up to the parent's calls: artifact when it greens. The `delivery` workflow declares `outputs: [merge]` — its merge artifact is the public outcome. A parent `calls: delivery` receives the merge value in its `delivered` artifact.
+
+#### §23.6.4 Failure branch
+
+A child that greens its declared outcome with a status-bearing value (e.g. `{status: 'failed'}`) propagates that value up unchanged. The parent's calls: artifact greens with the failure status, and teardown (or other consumers) receives it through the normal green gate. Teardown runs on success AND failure — there is no special consume mode for failure.
+
+#### §23.6.5 Gate fingerprint and re-arm
+
+The machine-green fingerprint covers only `gateStems` (the parent artifacts wired into the child via `callsInputs`). The child-outcome version is intentionally NOT included in the fingerprint — `fingerprintMatches` uses a key-count check that would fail if the child version key count differs from the gate stem count. The child-outcome re-green trigger is handled by `maintainCalls` value comparison (`deepEqual`), not by the pure cascade.
+
+#### §23.6.6 Transaction composition
+
+`maintainCalls` runs OUTSIDE any open `store.tx()`. Each mutating action (spawn via `createInstance`, re-provide via `provideInput`, machine-green) opens its own `store.tx()`. No nested transactions — better-sqlite3 does not support nested `BEGIN IMMEDIATE`.
+
+#### §23.6.7 Deferred
+
+- **Live cross-instance addressing** (`<step>.<child-path>` syntax) — §4.7 O7.
+- **GC of orphaned children** on parent delete — §4.8 D3.
+- **Fan-out / many-output children** — D1/D2. The v1 one-output rule is enforced.

@@ -418,9 +418,30 @@ After loading, the expanded def's loops are:
 
 Mode 2 is the **runtime** sibling of Mode 1. Instead of inlining a child workflow's loops at compile time, a `calls:` loop delegates to a **separate child workflow instance** at runtime. The calls: loop is machine-handled — it never emits a worker order.
 
-> **This is the static foundation (PR5a).** The grammar, validation, cross-def cycle check, and `producedBy` parent-coordinate storage are implemented. Runtime behavior (spawn, cascade-up, outcome propagation) lands in PR5b.
+PR5b (this PR) delivers the full runtime behavior: spawn, cascade-up, outcome propagation, re-attach, and re-provide. The `provisioned-delivery` example is now drivable end-to-end.
 
 ```yaml
+# delivery.yaml — the called workflow declares one public output
+name: delivery
+outputs: [merge]             # embedding interface: merge is the public outcome
+
+inputs:
+  - name: proposal
+    seedOwed: true
+
+loops:
+  - name: planner
+    consumes: [proposal]
+    produces: [plan]
+    # ...
+  - name: merger
+    consumes: [verdict]
+    produces: [merge]
+    terminal: true
+```
+
+```yaml
+# provisioned-delivery.yaml — the parent calls delivery
 name: provisioned-delivery
 
 inputs:
@@ -428,22 +449,34 @@ inputs:
     seedOwed: true
 
 loops:
+  - name: provision
+    consumes: [proposal]
+    produces: [sandbox]
+    body: Provision environment.
+
   - name: deliver
     calls: delivery          # child workflow name (must exist in the same def directory)
-    inputs:                  # optional: child input name → parent artifact name
+    inputs:                  # child input name → parent artifact name (gate: sandbox green)
       proposal: proposal
-    produces: [delivered]    # exactly one parent artifact (the outcome artifact)
+    produces: [delivered]    # exactly one parent artifact; greens when delivery.merge greens
 
   - name: teardown
     consumes: [delivered]
     produces: [torn_down]
     terminal: true
-    body: |
-      Tear down and green `torn_down`.
+    body: Tear down and green `torn_down`.
 ```
+
+Runtime behavior (all engine-internal, zero event bus, zero new subsystem):
+1. **Spawn**: when gate inputs (parent artifacts in `inputs:`) are green, `maintainCalls` creates the child instance with `producedBy` and seeds its declared inputs.
+2. **Re-attach**: `findChildByParent(parentWf, callsPath)` — spawn is guarded; if a child already exists (crash/re-tick), it is re-attached rather than duplicated.
+3. **Cascade-up**: when the child's declared `outputs:` artifact greens, the engine machine-greens the parent's calls: artifact (no worker run, no CAS). Durability is via the persisted `producedBy` link — even without the prompt, the next parent tick reads the child outcome.
+4. **Re-provide**: if a mapped gate input moves to a new version/value, the engine re-provides it to the existing child (the child re-runs internally). No second child is spawned.
+5. **Failure branch**: a child that greens its outcome with `{status: 'failed'}` propagates that value up unchanged. Teardown fires on success or failure.
 
 Grammar rules:
 - `calls:` names a workflow that exists in the same def directory (resolver namespace).
+- The called workflow must declare exactly one `outputs:` stem (v1 rule; validated at load time).
 - `inputs:` keys must be declared inputs of the child workflow; values must be real parent artifacts (inputs or loop produces).
 - `produces:` must declare exactly one artifact (the parent artifact the child outcome feeds).
 - A `calls:` loop has no `body:` — it is machine-handled, never a worker firing.
