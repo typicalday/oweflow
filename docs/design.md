@@ -20,7 +20,7 @@ function rather than a feature bolted beside it.
   re-production), an optional captured `value` (a handle, meaningful only when
   green), a `fingerprint` (the versions of its inputs at build time), an
   append-only `reasons` thread, and two stall counters — `judgmentRejects` (§6)
-  and `schemaRejects` (§18).
+  and `schemaRejects` (§19).
 - **§2.2 Task / lease** — the claimable unit of work-in-flight. One per
   `(loop, key)`; `key` is `""` for plain/reduce/collection firings and the
   element path for a map firing.
@@ -69,13 +69,13 @@ Three reject **kinds** (§11.9) are tracked:
 - **judgment** — a consumer's verdict that the artifact is wrong. Bumps
   `judgmentRejects`.
 - **validation** — a produced value failed the artifact's declared JSON Schema;
-  the engine refused the commit (§18). Bumps a *separate* `schemaRejects`
+  the engine refused the commit (§19). Bumps a *separate* `schemaRejects`
   counter.
 - **structural** — engine bookkeeping (a forward-cascade re-arm, a born-rejected
   commit). Bumps **neither** counter.
 
 A counter rides on the *judged artifact*. Once `judgmentRejects ≥ maxAttempts`
-(or `schemaRejects ≥ maxSchemaFailures`, §18) the artifact is **stalled**: it
+(or `schemaRejects ≥ maxSchemaFailures`, §19) the artifact is **stalled**: it
 remains a debt, but `eligibleFirings` stops producing any firing that would
 rebuild it. The loop has demonstrably failed; a human must intervene.
 `isStalled(a, cap)` and `isSchemaStalled(a, cap)` are the predicates;
@@ -113,7 +113,7 @@ order-independent — re-running `settle()` on a healthy graph yields no ops.
 - **§11.x reduce `src[*]`** — fan-in: see §3.
 - **§11.3** — the five-state lifecycle (above).
 - **§11.8** — the forward cascade (above).
-- **§11.9** — the three reject kinds (above): judgment, validation (§18), structural.
+- **§11.9** — the three reject kinds (above): judgment, validation (§19), structural.
 
 ## §12 Concurrency
 
@@ -157,7 +157,31 @@ logs, external exports, dev-branch stubs — under `generates:`. The behavioral 
   hard error. Two loops generating the same stem is a one-writer error (the same rule that
   applies to `produces:`).
 
-## §17 Derived status
+## §17 Workflow outputs (`outputs:`)
+
+A workflow may declare its public output stems — the leaves it intentionally produces as
+its embedding interface — under a top-level `outputs:` field.
+
+- **Lint exemption:** stems listed in `outputs:` are exempt from `deadEndWarnings`, as a
+  third exemption alongside `terminal:` (loop-level) and `generates:` (loop-level). A
+  declared public output is self-evidently an intentional leaf.
+- **Re-armability:** unlike `terminal: true`, listing a stem in `outputs:` does NOT freeze
+  re-arm. The cascade may re-arm an `outputs:`-listed artifact if its upstream inputs move.
+- **Validation:** `validateDef` hard-errors if any `outputs:` entry names a stem that no
+  loop produces. Stems declared under `generates:` are unioned into `produces` at build
+  time and therefore count as produced — naming them in `outputs:` is valid.
+- **Future use:** `outputs:` will become the boundary contract for workflow composition
+  (`include:` / `calls:`). This wiring is not implemented yet.
+
+Relationship of the three exemption mechanisms:
+
+| key | level | lint-exempt | re-armable | primary purpose |
+|---|---|---|---|---|
+| `terminal: true` | loop | yes | no | destructive completion; green never re-armed |
+| `generates:` | loop | yes | yes | internal intentional sink, not the public interface |
+| `outputs:` | workflow | yes | yes | public interface / future composition boundary |
+
+## §18 Derived status
 
 `workflowStatus` is computed from artifact state on every call and never stored:
 
@@ -172,7 +196,7 @@ logs, external exports, dev-branch stubs — under `generates:`. The behavioral 
 This is the operator's whole view, and because it is a pure read it can never
 drift from the real state the engine acts on.
 
-## §18 Schema validation
+## §19 Schema validation
 
 The engine is domain-neutral — it doesn't know what a `plan` *means*. But a
 wiring may still want to guarantee its *shape*: that a `plan` is an object with

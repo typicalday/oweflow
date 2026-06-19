@@ -819,3 +819,142 @@ test('lintDef: terminal: true suppresses all dead-end warnings even when generat
   }));
   assert.deepEqual(warnings, []);
 });
+
+// ---- outputs: key tests ------------------------------------------------------
+
+// A minimal workflow fixture for outputs: tests
+// reporter produces 'summary' (via produces:) and 'audit_log' (via generates:)
+// 'summary' is declared in workflow-level outputs:
+const baseWithOutputs = {
+  name: 'report',
+  inputs: [{ name: 'proposal' }],
+  outputs: ['summary'],
+  loops: [
+    { name: 'planner', consumes: ['proposal'], produces: ['plan'], body: 'plan it' },
+    { name: 'reporter', consumes: ['plan'], produces: ['summary'], generates: ['audit_log'], body: 'report it' },
+  ],
+};
+
+// Test (pre-a): def.outputs is present and equals ['summary']
+test('outputs: buildDef sets def.outputs to the declared list', () => {
+  const d = buildDef(baseWithOutputs);
+  assert.deepEqual(d.outputs, ['summary']);
+});
+
+// Test (pre-b): outputs: [] leaves def.outputs absent
+test('outputs: empty array leaves def.outputs absent', () => {
+  const d = buildDef({
+    name: 'no-outs',
+    inputs: [{ name: 'q' }],
+    outputs: [],
+    loops: [{ name: 'a', consumes: ['q'], produces: ['out'], terminal: true, body: '' }],
+  });
+  assert.ok(d.outputs === undefined, 'def.outputs should be absent for empty array');
+});
+
+// Test (a): outputs:-listed unconsumed leaf produces NO dead-end warning
+test('lintDef: outputs:-listed unconsumed stem is exempt from dead-end warnings', () => {
+  const { warnings } = lintDef(buildDef(baseWithOutputs));
+  assert.ok(
+    !warnings.some((w) => w.includes('summary')),
+    `expected no warning for 'summary'; got: ${warnings.join('; ')}`,
+  );
+});
+
+// Test (b): unlisted unconsumed leaf STILL warns; listed one does not
+test('lintDef: unlisted unconsumed stem still warns; outputs:-listed one does not', () => {
+  const { warnings } = lintDef(buildDef({
+    name: 'partial',
+    inputs: [{ name: 'proposal' }],
+    outputs: ['summary'],
+    loops: [
+      { name: 'planner', consumes: ['proposal'], produces: ['plan'], body: 'plan it' },
+      { name: 'reporter', consumes: ['plan'], produces: ['summary', 'orphan'], body: 'report it' },
+    ],
+  }));
+  assert.ok(
+    warnings.some((w) => w.includes('orphan')),
+    `expected warning for 'orphan'; got: ${warnings.join('; ')}`,
+  );
+  assert.ok(
+    !warnings.some((w) => w.includes('summary')),
+    `expected no warning for 'summary'; got: ${warnings.join('; ')}`,
+  );
+});
+
+// Test (c): all three exemptions coexist (terminal:, generates:, outputs:)
+test('lintDef: terminal:, generates:, and outputs: exemptions all active simultaneously', () => {
+  const { warnings } = lintDef(buildDef({
+    name: 'all-exempt',
+    inputs: [{ name: 'q' }],
+    outputs: ['summary'],
+    loops: [
+      { name: 'sink', consumes: ['q'], produces: ['final'], terminal: true, body: '' },
+      { name: 'gen', consumes: ['q'], produces: ['plan'], generates: ['audit_log'], terminal: true, body: '' },
+      { name: 'pub', consumes: ['q'], produces: ['summary'], body: '' },
+    ],
+  }));
+  assert.deepEqual(warnings, []);
+});
+
+// Test (d): outputs: entry naming a stem no loop produces → hard validateDef error
+test('validateDef: outputs: entry naming an unproduced stem is a hard error', () => {
+  const errors = validateDef(buildDef({
+    name: 'bad-out',
+    inputs: [{ name: 'q' }],
+    outputs: ['nonexistent'],
+    loops: [{ name: 'a', consumes: ['q'], produces: ['out'], terminal: true, body: '' }],
+  }));
+  assert.ok(
+    errors.some((e) => e.includes('outputs:') && e.includes('nonexistent')),
+    `expected hard error for 'nonexistent'; got: ${errors.join('; ')}`,
+  );
+});
+
+// Test (e): outputs: entry naming a generates: stem → VALID (no error, no warning)
+test('validateDef + lintDef: outputs: naming a generates: stem is valid', () => {
+  const d = buildDef({
+    name: 'gen-out',
+    inputs: [{ name: 'q' }],
+    outputs: ['audit_log'],
+    loops: [
+      { name: 'a', consumes: ['q'], generates: ['audit_log'], produces: ['out'], terminal: true, body: '' },
+    ],
+  });
+  assert.deepEqual(validateDef(d), []);
+  const { warnings } = lintDef(d);
+  assert.ok(
+    !warnings.some((w) => w.includes('audit_log')),
+    `expected no warning for 'audit_log'; got: ${warnings.join('; ')}`,
+  );
+});
+
+// Test (f): outputs: naming an input stem (not produced by any loop) → hard error
+test('validateDef: outputs: entry naming an input stem is a hard error', () => {
+  const errors = validateDef(buildDef({
+    name: 'input-out',
+    inputs: [{ name: 'proposal' }],
+    outputs: ['proposal'],
+    loops: [{ name: 'a', consumes: ['proposal'], produces: ['result'], terminal: true, body: '' }],
+  }));
+  assert.ok(
+    errors.some((e) => e.includes('outputs:') && e.includes('proposal')),
+    `expected hard error for input stem 'proposal'; got: ${errors.join('; ')}`,
+  );
+});
+
+// Test (g): dead-end warning message mentions outputs: as a remedy
+test('lintDef: dead-end warning message mentions outputs:', () => {
+  const { warnings } = lintDef(buildDef({
+    name: 'warn-msg',
+    inputs: [{ name: 'q' }],
+    loops: [
+      { name: 'a', consumes: ['q'], produces: ['orphan'], body: '' },
+      { name: 'b', consumes: ['q'], produces: ['final'], terminal: true },
+    ],
+  }));
+  assert.ok(
+    warnings.some((w) => /outputs:/.test(w)),
+    `expected warning mentioning outputs:; got: ${warnings.join('; ')}`,
+  );
+});

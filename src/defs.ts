@@ -63,6 +63,7 @@ interface RawDef {
   description?: unknown;
   inputs?: unknown;
   loops?: unknown;
+  outputs?: unknown;
   invariants?: unknown;
 }
 
@@ -113,7 +114,7 @@ function asSchema(v: unknown, ctx: string): JsonSchema {
 /**
  * Parse a loop's `produces` list. Each entry is either a bare pattern string
  * (`plan`, `gather.source[]`) or a mapping `{ name, schema }` attaching a JSON
- * Schema the produced value must satisfy at commit time (§18).
+ * Schema the produced value must satisfy at commit time (§19).
  */
 function parseProduces(v: unknown, ctx: string): ProducePattern[] {
   if (v === undefined) return [];
@@ -255,6 +256,10 @@ export function buildDef(raw: unknown, source?: string): WorkflowDef {
   if (r.description !== undefined) def.description = asString(r.description, 'description');
   const invariants = parseInvariants(r.invariants, 'invariants');
   if (invariants.length > 0) def.invariants = invariants;
+  if (r.outputs !== undefined) {
+    const outs = asStringArray(r.outputs, 'outputs');
+    if (outs.length > 0) def.outputs = outs;
+  }
   return def;
 }
 
@@ -365,6 +370,18 @@ export function validateDef(def: WorkflowDef): string[] {
     for (const p of producesOnly) {
       if (generatedStems.has(p.stem)) {
         errors.push(`loop '${l.name}': stem '${p.stem}' appears in both produces: and generates: (remove it from one)`);
+      }
+    }
+  }
+
+  // outputs: entries must name stems produced by some loop
+  if (def.outputs && def.outputs.length > 0) {
+    const allProducedStems = new Set<string>(
+      def.loops.flatMap((l) => l.produces.map((p) => p.stem)),
+    );
+    for (const stem of def.outputs) {
+      if (!allProducedStems.has(stem)) {
+        errors.push(`outputs: entry '${stem}' is not produced by any loop`);
       }
     }
   }
@@ -530,6 +547,8 @@ function deadEndWarnings(def: WorkflowDef): string[] {
   const generatedStems = new Set<string>(
     def.loops.flatMap((l) => (l.generates ?? []).map((p) => p.stem)),
   );
+  // stems declared in workflow outputs: are intentional public leaves — lint-exempt
+  const workflowOutputStems = new Set<string>(def.outputs ?? []);
 
   const warnings: string[] = [];
   for (const l of def.loops) {
@@ -537,10 +556,12 @@ function deadEndWarnings(def: WorkflowDef): string[] {
     for (const p of l.produces) {
       if (p.kind === 'map') continue; // per-element outputs are not top-level stems
       if (generatedStems.has(p.stem)) continue; // generates: exempt
+      if (workflowOutputStems.has(p.stem)) continue; // workflow outputs: exempt
       if (!consumed.has(p.stem)) {
         warnings.push(
           `loop '${l.name}' produces '${p.stem}' but nothing consumes it ` +
           `(dead-end output; declare it under generates: if no consumer is expected, ` +
+          `list it in the workflow outputs: if it is a public interface leaf, ` +
           `or mark the loop terminal: true if this is an intended sink)`,
         );
       }
