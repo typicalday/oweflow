@@ -31,7 +31,7 @@ export type Author = 'engine' | 'human' | string; // a loop name, or these speci
  * The kind of an invalidation, for the §6 liveness accounting.
  *  - `judgment`: a consumer's verdict ("fix it") — counts toward the §6 stall.
  *  - `structural`: engine bookkeeping (cascade / born-rejected / re-arm) — does NOT count.
- *  - `validation`: a produced value failed its declared JSON Schema (§18) — counts
+ *  - `validation`: a produced value failed its declared JSON Schema (§19) — counts
  *    toward a *separate* per-artifact stall bounded by the loop's `maxSchemaFailures`.
  */
 export type RejectKind = 'judgment' | 'structural' | 'validation';
@@ -77,7 +77,7 @@ export interface ArtifactData {
   fingerprint?: Fingerprint; // inputs' versions at build time (on green outputs)
   reasons: ReasonEntry[]; // append-only thread
   judgmentRejects: number; // §6 stall counter — judgment rejects only
-  schemaRejects: number; // §18 stall counter — schema-validation rejects only
+  schemaRejects: number; // §19 stall counter — schema-validation rejects only
   /** marks a seal artifact; carries the collection name it seals */
   sealOf?: string;
   /** a green that fired irreversible cleanup cannot be re-armed (design §15.2) */
@@ -135,7 +135,7 @@ export interface ProducePattern {
   stem: string;
   binder?: string; // for map outputs: binder name
   suffix: string;
-  /** optional JSON Schema the produced value must satisfy at commit time (§18) */
+  /** optional JSON Schema the produced value must satisfy at commit time (§19) */
   schema?: JsonSchema;
 }
 
@@ -154,7 +154,7 @@ export interface LoopDef {
   maxRunsPerDay: number;
   parallel: number;
   maxAttempts: number;
-  /** §18: how many schema-validation failures an output may accrue before it stalls */
+  /** §19: how many schema-validation failures an output may accrue before it stalls */
   maxSchemaFailures: number;
   model?: string;
   workdir: string;
@@ -171,6 +171,10 @@ export interface WorkflowDef {
   /** external inputs seeded as artifacts when an instance starts (e.g. "proposal") */
   inputs: InputDef[];
   loops: LoopDef[];
+  /** Workflow-level public outputs / embedding interface (design doc §5.2).
+   *  Declared stems are intentional leaves: lint-exempt from dead-end warnings.
+   *  A stem listed here that no loop produces is a hard validateDef error. */
+  outputs?: string[];
   dir?: string; // source directory, if loaded from disk
   /** Declared safety invariants verified by `modelCheck`/`oweflow check`. */
   invariants?: InvariantDef[];
@@ -182,11 +186,11 @@ export interface InputDef {
   producer: string; // "human" by convention, or any external label
   /** if true, instance start leaves it owed; otherwise it must be provided at start */
   seedOwed: boolean;
-  /** optional JSON Schema a provided input value must satisfy (§18) */
+  /** optional JSON Schema a provided input value must satisfy (§19) */
   schema?: JsonSchema;
 }
 
-// ---- trace types (§17 derived view: temporal causal timeline) ----------------
+// ---- trace types (§18 derived view: temporal causal timeline) ----------------
 
 /**
  * One chronological event in the workflow's execution history: a single run
