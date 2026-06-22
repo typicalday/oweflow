@@ -584,12 +584,19 @@ export function maintainDecisions(def: WorkflowDef, arts: ArtifactMap, time?: Ti
     }
   }
 
+  // Terminal-settle invariant (§15.2): once any terminal artifact is green,
+  // the instance is sealed — no completion evaluator should re-arm.
+  const anyTerminalGreen = [...arts.values()].some(
+    (a) => a.acceptance === 'green' && a.terminal === true,
+  );
+
   // allGreen re-arm: a green outcome of an allGreen-triggered loop is re-armed
   // when the workflow is no longer all-green (excluding the evaluator's own outputs).
   // This ensures the evaluator re-fires if the workflow later falls out of done.
   for (const loop of def.loops) {
     const triggers = resolvedTriggers(loop);
     if (!triggers.includes('allGreen')) continue;
+    if (anyTerminalGreen) continue; // sealed — terminal artifact already green
 
     // Compute this evaluator's output paths.
     const evaluatorOutputPaths = plainOutputs(loop);
@@ -618,6 +625,7 @@ export function maintainDecisions(def: WorkflowDef, arts: ArtifactMap, time?: Ti
       const triggers = resolvedTriggers(loop);
       if (!triggers.includes('idle')) continue;
       if (!idleEligible(loop, arts, time)) continue; // threshold not reached
+      if (anyTerminalGreen) continue; // sealed — terminal artifact already green
 
       const evaluatorOutputPaths = plainOutputs(loop);
       for (const path of evaluatorOutputPaths) {

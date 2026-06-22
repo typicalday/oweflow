@@ -417,6 +417,57 @@ test('(g) heartbeat re-arm: maintainDecisions emits idle-rearm when alarm elapse
   assert.equal(rearmOps.length, 1, 'idle-rearm op emitted when alarm elapsed and outcome is green');
 });
 
+// ============================================================
+// Terminal-settle invariant tests (§15.2)
+// ============================================================
+
+// ---- (f) terminal-settle: evaluator NOT re-armed when terminal artifact is green ----
+
+test('(f) terminal-settle invariant: evaluator not re-armed when terminal artifact is green', () => {
+  // Workflow: planner → plan, merger (terminal) → merge (terminal:true), completion (allGreen) → outcome
+  // State: merge is green+terminal, plan went back to owed (mid-pipeline debt after terminal green)
+  // maintainDecisions: outcome must NOT be re-armed (terminal artifact is green)
+  const d = def('terminal-wf', [input('proposal')], [
+    loop({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+    loop({ name: 'merger', consumes: ['plan'], produces: ['merge'], terminal: true }),
+    loop({ name: 'completion', produces: ['outcome'], on: ['allGreen'] }),
+  ]);
+
+  const state = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 2 },
+    { path: 'plan', producer: 'planner', acceptance: 'owed', version: 1 },
+    { path: 'merge', producer: 'merger', acceptance: 'green', version: 1, terminal: true },
+    { path: 'outcome', producer: 'completion', acceptance: 'green', version: 1 },
+  ]);
+
+  const ops = maintainDecisions(d, state);
+  const rearmOps = ops.filter((op) => op.kind === 'reject' && op.path === 'outcome');
+  assert.equal(rearmOps.length, 0, 'outcome must NOT be re-armed when a terminal artifact is green');
+});
+
+// ---- (g) non-regression: poller (no terminal) still re-arms normally -----------
+
+test('(g) non-regression: poller (no terminal artifact) still re-arms when workflow falls out of done', () => {
+  // Same shape but no terminal artifact — the allGreen evaluator must still re-arm
+  const d = def('poller-wf', [input('proposal')], [
+    loop({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+    loop({ name: 'completion', produces: ['outcome'], on: ['allGreen'] }),
+  ]);
+  // No terminal artifact — plan is owed after a fall-out-of-done
+  const state = arts([
+    { path: 'proposal', producer: 'human', acceptance: 'green', version: 2 },
+    { path: 'plan', producer: 'planner', acceptance: 'owed', version: 1 },
+    { path: 'outcome', producer: 'completion', acceptance: 'green', version: 1 },
+  ]);
+  const ops = maintainDecisions(d, state);
+  const rearmOps = ops.filter((op) => op.kind === 'reject' && op.path === 'outcome');
+  assert.equal(
+    rearmOps.length,
+    1,
+    'outcome MUST be re-armed when no terminal artifact is green (poller pattern)',
+  );
+});
+
 // ---- (h) PURITY: eligibleFirings is idempotent for fixed (arts, timeFacts) ----
 
 test('(h) purity: eligibleFirings is idempotent for identical (arts, timeFacts)', () => {

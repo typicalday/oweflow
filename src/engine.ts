@@ -270,6 +270,10 @@ export class Engine {
     });
     this.fire({ type: 'commit', workflow, path: name, action: 'provide' });
     this.fireSettled(workflow);
+    // M2B cascade-up: re-run calls: child maintenance so a newly-provided input
+    // is immediately re-provided to any child that maps from it (no extra tick needed).
+    // Outside the tx — same contract as tick's maintainCalls call at line 417.
+    this.maintainCalls(workflow, def);
   }
 
   // ---- Mode 2 calls: child-instance management --------------------------------

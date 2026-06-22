@@ -385,6 +385,48 @@ test('calls: (f) gate re-arm — cascade re-arms delivered, maintainCalls re-pro
   assert.deepEqual(deliveredV2?.value, { value: 'done-v2' });
 });
 
+// ---- test (g): provideInput cascades to calls: child without extra tick -------
+
+/**
+ * parentProvideDef: input(data2 seedOwed) feeds directly into the deliver loop's
+ * callsInputs so that engine.provideInput(parentWf, 'data2', ...) must cascade
+ * immediately to the child's 'data' artifact — no extra tick required.
+ */
+const parentProvideLoop: LoopDef = {
+  ...loop({ name: 'deliver', produces: ['delivered'] }),
+  calls: 'childDef',
+  callsInputs: { data: 'data2' },
+  consumes: [],
+};
+const parentProvideDef: WorkflowDef = def(
+  'parentProvideDef',
+  [input('data2', { seedOwed: true })],
+  [parentProvideLoop],
+);
+
+test('calls: (g) provideInput cascades to calls: child without extra tick', () => {
+  const { engine, store } = makeEngine([childDef, parentProvideDef]);
+
+  // Create parent with data2=v1 provided
+  const parentWf = engine.createInstance('parentProvideDef', { provide: { data2: { env: 'v1' } } });
+
+  // Tick parent → maintainCalls spawns child immediately (gate input data2 is green)
+  engine.tick(parentWf);
+  const childRow = store.findChildByParent(parentWf, 'delivered');
+  assert.ok(childRow !== undefined, 'child should be spawned after tick with data2 green');
+  assert.deepEqual(getArt(store, childRow!.id, 'data')?.value, { env: 'v1' });
+
+  // Re-provide data2 via provideInput (human/external update) — no extra tick
+  engine.provideInput(parentWf, 'data2', { env: 'v2' });
+
+  // Without any extra tick, child data must already be updated to v2
+  assert.deepEqual(
+    getArt(store, childRow!.id, 'data')?.value,
+    { env: 'v2' },
+    'child input must be updated immediately by provideInput cascade, no extra tick required',
+  );
+});
+
 // ---- defs validation tests (outputs: check) ----------------------------------
 
 test('loadDefs: calls target with no outputs: throws DefError', () => {
