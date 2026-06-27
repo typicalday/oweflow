@@ -1,17 +1,17 @@
 {
-  "name": "owenloop",
+  "name": "owenwork",
   "version": "0.1.0",
-  "description": "Owen — a debt-driven dataflow engine. Steps fire on what they owe, not a status; the graph stays honest with its live inputs and knows when to stop. The disciplined engine for your Ralph loop. Direct node:sqlite (WAL + commit-fingerprint CAS).",
+  "description": "owenwork — a debt-driven dataflow engine for agent workflows. Steps fire on what they owe, not a status; the graph stays honest with its live inputs and knows when to stop. The deterministic rails your probabilistic agents run on — the part of your owen loop that doesn't hallucinate. Direct node:sqlite (WAL + commit-fingerprint CAS).",
   "license": "Apache-2.0",
   "author": "typicalday",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/typicalday/owenloop.git"
+    "url": "git+https://github.com/typicalday/owenwork.git"
   },
-  "homepage": "https://github.com/typicalday/owenloop#readme",
+  "homepage": "https://github.com/typicalday/owenwork#readme",
   "bugs": {
-    "url": "https://github.com/typicalday/owenloop/issues"
+    "url": "https://github.com/typicalday/owenwork/issues"
   },
   "keywords": [
     "workflow",
@@ -20,10 +20,14 @@
     "sqlite",
     "orchestration",
     "dag",
-    "state-machine"
+    "state-machine",
+    "agents",
+    "ai-agents",
+    "determinism",
+    "owen-loop"
   ],
   "bin": {
-    "owenloop": "bin/owenloop.mjs"
+    "owenwork": "bin/owenwork.mjs"
   },
   "exports": {
     ".": {
@@ -41,7 +45,7 @@
     "access": "public"
   },
   "scripts": {
-    "owenloop": "node bin/owenloop.mjs",
+    "owenwork": "node bin/owenwork.mjs",
     "test": "node --test --test-reporter=spec test/*.test.ts",
     "test:quiet": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",

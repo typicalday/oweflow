@@ -1,6 +1,6 @@
-# Embedding owenloop
+# Embedding owenwork
 
-owenloop is a library first and a CLI second. The `owenloop` binary in
+owenwork is a library first and a CLI second. The `owenwork` binary in
 [`src/cli.ts`](../src/cli.ts) is a thin adapter: it maps `argv` to method calls
 on an `Engine` and prints the results as JSON. Everything it does, a host
 process can do **in-process** — and get the lifecycle back as typed objects
@@ -13,10 +13,10 @@ can react the instant the graph advances instead of polling.
 ## The one-call factory
 
 ```ts
-import { createEngine } from 'owenloop';
+import { createEngine } from 'owenwork';
 
 const { engine, store } = createEngine({
-  db: '.owenloop/state.db',   // SQLite path; ':memory:' for ephemeral. Default: .owenloop/state.db
+  db: '.owenwork/state.db',   // SQLite path; ':memory:' for ephemeral. Default: .owenwork/state.db
   defsDir: 'workflows',      // load *.yaml defs from a directory
 });
 ```
@@ -25,7 +25,7 @@ const { engine, store } = createEngine({
 
 | option      | meaning |
 |-------------|---------|
-| `db`        | SQLite path. `':memory:'` for an ephemeral store (great in tests). Defaults to `.owenloop/state.db`; parent dirs are created for a file path. |
+| `db`        | SQLite path. `':memory:'` for an ephemeral store (great in tests). Defaults to `.owenwork/state.db`; parent dirs are created for a file path. |
 | `defs`      | In-memory definitions as a `Map<string, WorkflowDef>` or an array of `WorkflowDef` (de-duped by name). Takes precedence over `defsDir`. |
 | `defsDir`   | Directory of `*.yaml` definitions, loaded via `loadDefs`. A missing dir yields no defs (lenient, like the CLI), not an error. |
 | `reapTtlMs` | Forwarded to the `Engine` — the stranded-lease reap TTL. |
@@ -39,9 +39,9 @@ Prefer to wire it yourself? The pieces are all exported — `createEngine` is ju
 sugar over them:
 
 ```ts
-import { Engine, openStore, loadDefs } from 'owenloop';
+import { Engine, openStore, loadDefs } from 'owenwork';
 
-const store = openStore('.owenloop/state.db');
+const store = openStore('.owenwork/state.db');
 const defs = loadDefs('workflows');
 const engine = new Engine(store, (name) => {
   const d = defs.get(name);
@@ -157,7 +157,7 @@ Defs don't have to come from disk. Build them in code and pass `defs` — useful
 when a host generates workflows or keeps them out of the filesystem:
 
 ```ts
-import { createEngine, parseDef } from 'owenloop';
+import { createEngine, parseDef } from 'owenwork';
 
 const research = parseDef(/* a WorkflowDef-shaped object or YAML you parsed */);
 const { engine } = createEngine({ db: ':memory:', defs: [research] });

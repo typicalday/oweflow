@@ -1,7 +1,7 @@
 /**
  * End-to-end battery for JSON Schema validation (design §18).
  *
- * Drives the real `owenloop` binary as a subprocess against real SQLite, using
+ * Drives the real `owenwork` binary as a subprocess against real SQLite, using
  * the `schemacheck` fixture (test/fixtures/schema.yaml): a `spec` input, a `plan`
  * singleton, and a `source[]` collection all carry a `schema:`. We exercise the
  * full surface a wiring sees — a malformed commit is *schema-rejected* (not
@@ -17,18 +17,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..');
-const BIN = join(ROOT, 'bin', 'owenloop.mjs');
+const BIN = join(ROOT, 'bin', 'owenwork.mjs');
 const FIXTURES = join(ROOT, 'test', 'fixtures');
 const EXAMPLES = join(ROOT, 'examples', 'workflows');
 
 /** A throwing CLI bound to a fresh temp db + a defs dir (fixtures by default), plus `.raw`. */
 function harness(defsDir: string = FIXTURES) {
-  const db = join(mkdtempSync(join(tmpdir(), 'owenloop-schema-')), 'state.db');
+  const db = join(mkdtempSync(join(tmpdir(), 'owenwork-schema-')), 'state.db');
   const run = (...args: string[]) =>
     spawnSync(process.execPath, [BIN, ...args, '--db', db, '--defs', defsDir], { encoding: 'utf8' });
   const ow = (...args: string[]): any => {
     const r = run(...args);
-    if (r.status !== 0) throw new Error(`owenloop ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
+    if (r.status !== 0) throw new Error(`owenwork ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
     const out = r.stdout.trim();
     return out ? JSON.parse(out) : null;
   };

@@ -8,12 +8,12 @@
 # green it is a destructive completion and can never be re-armed (§15.2).
 #
 # Drive it (the "wiring" / worker step):
-#   wf=$(owenloop create delivery --provide proposal='{"text":"add dark mode"}' | jq -r .workflow)
-#   owenloop tick $wf          # -> an order for `planner`
-#   owenloop green $wf <run> plan --value '{"plan":"..."}'
+#   wf=$(owenwork create delivery --provide proposal='{"text":"add dark mode"}' | jq -r .workflow)
+#   owenwork tick $wf          # -> an order for `planner`
+#   owenwork green $wf <run> plan --value '{"plan":"..."}'
 #   ...                       # tick/green down the chain
-#   owenloop reject $wf pr --by reviewer --text "tests missing"   # knock-back
-#   owenloop status $wf        # debts / eligible / blocked
+#   owenwork reject $wf pr --by reviewer --text "tests missing"   # knock-back
+#   owenwork status $wf        # debts / eligible / blocked
 
 name: delivery
 title: Software delivery
@@ -22,7 +22,7 @@ outputs: [merge]
 
 inputs:
   - name: proposal          # required: the workflow stays blocked until supplied
-    seedOwed: true          # `--provide proposal=...` at create, or `owenloop provide`
+    seedOwed: true          # `--provide proposal=...` at create, or `owenwork provide`
 
 steps:
   - name: planner

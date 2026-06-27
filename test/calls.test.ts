@@ -430,7 +430,7 @@ test('calls: (g) provideInput cascades to calls: child without extra tick', () =
 // ---- defs validation tests (outputs: check) ----------------------------------
 
 test('loadDefs: calls target with no outputs: throws DefError', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'owenloop-calls-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'owenwork-calls-test-'));
   try {
     writeFileSync(
       join(dir, 'child.yaml'),
@@ -470,7 +470,7 @@ test('loadDefs: calls target with no outputs: throws DefError', () => {
 });
 
 test('loadDefs: calls target with 2 outputs: throws DefError', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'owenloop-calls-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'owenwork-calls-test-'));
   try {
     writeFileSync(
       join(dir, 'child.yaml'),
@@ -515,7 +515,7 @@ test('loadDefs: calls target with 2 outputs: throws DefError', () => {
 });
 
 test('loadDefs: calls target with exactly 1 output is valid', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'owenloop-calls-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'owenwork-calls-test-'));
   try {
     writeFileSync(
       join(dir, 'child.yaml'),

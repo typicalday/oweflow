@@ -41,23 +41,23 @@
 #   be true before the evaluator has even run.
 #
 # Drive it — happy path (contract approved within SLA):
-#   wf=$(owenloop create sla-watchdog \
+#   wf=$(owenwork create sla-watchdog \
 #          --provide contract='{"title":"MSA with Acme","submitted_at":"2026-06-20"}' \
 #          | jq -r .workflow)
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `review`
-#   owenloop green $wf $run verdict --value '{"approved":true,"reviewer":"alice"}'
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `approve`
-#   owenloop green $wf $run approval --value '{"signed":true}' --terminal
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `monitor` (cause: allGreen)
-#   owenloop green $wf $run outcome --value '{"status":"approved","cause":"allGreen"}'
-#   owenloop status $wf            # done
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `review`
+#   owenwork green $wf $run verdict --value '{"approved":true,"reviewer":"alice"}'
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `approve`
+#   owenwork green $wf $run approval --value '{"signed":true}' --terminal
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `monitor` (cause: allGreen)
+#   owenwork green $wf $run outcome --value '{"status":"approved","cause":"allGreen"}'
+#   owenwork status $wf            # done
 #
 # Idle path (contract stuck past 2 h — illustrative; omit --now in real use):
 #   # After idleAfter elapses with no progress, tick returns a `monitor` order:
-#   #   run=$(owenloop tick $wf --now $(date -d '+2h1m' +%s)000 | jq -r '.orders[0].run')
+#   #   run=$(owenwork tick $wf --now $(date -d '+2h1m' +%s)000 | jq -r '.orders[0].run')
 #   #   # order.cause === 'idle' — worker sends escalation nudge and re-arms alarm:
 #   #   #   see the engine.setAlarm snippet below
-#   #   owenloop green $wf $run outcome \
+#   #   owenwork green $wf $run outcome \
 #   #     --value '{"status":"escalated","escalated_at":"2026-06-20T14:00:00Z","cause":"idle"}'
 #   #   # engine re-arms the monitor via idle-rearm; tick after another hour yields a new order
 #

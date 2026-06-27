@@ -1,5 +1,5 @@
 /**
- * owenloop — a generic dataflow workflow engine.
+ * owenwork — a generic dataflow workflow engine.
  *
  * Steps owe and consume artifacts; a step's eligibility to run is a pure
  * function of artifact state (debts + dependency satisfaction), not a status

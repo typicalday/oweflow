@@ -6,23 +6,23 @@
 # *schema-rejected* (reject kind `validation`), NOT greened — the artifact stays
 # a debt, the violations ride its reason thread, and the worker can correct and
 # re-green on the same open run. Repeated schema failures past `maxSchemaFailures`
-# stall the producer the same way a §6 judgment stall does; `owenloop retry`
+# stall the producer the same way a §6 judgment stall does; `owenwork retry`
 # resets the counter and re-arms it. Shape is the engine's business; *meaning*
 # stays a consumer's `reject`.
 #
 # Drive it — every value below conforms; the commented one is refused on purpose:
-#   wf=$(owenloop create intake \
+#   wf=$(owenwork create intake \
 #          --provide request='{"source":"https://example.com/feed","format":"json"}' | jq -r .workflow)
-#   owenloop tick  $wf                                     # -> order for `parse`
-#   owenloop green $wf <run> spec --value '{"endpoint":"https://example.com/feed","limit":50}'
+#   owenwork tick  $wf                                     # -> order for `parse`
+#   owenwork green $wf <run> spec --value '{"endpoint":"https://example.com/feed","limit":50}'
 #   # a malformed value is schema-rejected, not greened (endpoint fails ^https?://):
-#   #   owenloop green $wf <run> spec --value '{"endpoint":"not-a-url"}'   # -> {"outcome":"schema-rejected", ...}
-#   owenloop tick  $wf                                     # -> order for `fetch` (collection)
-#   owenloop emit  $wf <run> --items '[{"id":"a1","title":"First"},{"id":"a2","title":"Second"}]'
-#   owenloop seal  $wf <run>                               # done emitting
-#   owenloop tick  $wf                                     # -> order for `index` (reduce)
-#   owenloop green $wf <run> report --value '{"count":2}'
-#   owenloop status $wf                                    # done
+#   #   owenwork green $wf <run> spec --value '{"endpoint":"not-a-url"}'   # -> {"outcome":"schema-rejected", ...}
+#   owenwork tick  $wf                                     # -> order for `fetch` (collection)
+#   owenwork emit  $wf <run> --items '[{"id":"a1","title":"First"},{"id":"a2","title":"Second"}]'
+#   owenwork seal  $wf <run>                               # done emitting
+#   owenwork tick  $wf                                     # -> order for `index` (reduce)
+#   owenwork green $wf <run> report --value '{"count":2}'
+#   owenwork status $wf                                    # done
 
 name: intake
 title: Schema-validated intake
@@ -30,7 +30,7 @@ description: Validate a request, derive a fetch spec, gather records, index them
 
 inputs:
   - name: request
-    seedOwed: true            # required: supply with --provide or `owenloop provide`
+    seedOwed: true            # required: supply with --provide or `owenwork provide`
     # the external request is refused unless it carries a URL source and a known
     # format — a `provide`/`create` with a bad value exits non-zero (§18).
     schema:

@@ -1,5 +1,5 @@
 /**
- * Embedding owenloop in a Node process.
+ * Embedding owenwork in a Node process.
  *
  * The CLI speaks JSON on stdout; in-process you get the same engine returning
  * typed objects (`Order`, `CommitResult`, `WorkflowStatus`) — no subprocess, no

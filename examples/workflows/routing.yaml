@@ -10,13 +10,13 @@
 # `route` and the skipped subtree re-arms.
 #
 # Drive it:
-#   wf=$(owenloop create routing --provide ticket='{"kind":"refund"}' | jq -r .workflow)
-#   owenloop tick $wf                                   # -> order for `triage`
-#   owenloop green $wf <run> route --value '{"branch":"refund"}'
-#   owenloop tick $wf                                   # -> orders for BOTH refund & deny
-#   owenloop green $wf <refund-run> refund_done --value '{"refunded":true}'
-#   owenloop skip  $wf denial --by deny --text "route=refund, deny branch is dead"
-#   owenloop status $wf                                 # done: notice auto-skipped
+#   wf=$(owenwork create routing --provide ticket='{"kind":"refund"}' | jq -r .workflow)
+#   owenwork tick $wf                                   # -> order for `triage`
+#   owenwork green $wf <run> route --value '{"branch":"refund"}'
+#   owenwork tick $wf                                   # -> orders for BOTH refund & deny
+#   owenwork green $wf <refund-run> refund_done --value '{"refunded":true}'
+#   owenwork skip  $wf denial --by deny --text "route=refund, deny branch is dead"
+#   owenwork status $wf                                 # done: notice auto-skipped
 
 name: routing
 title: Conditional routing

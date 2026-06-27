@@ -1,12 +1,12 @@
 /**
- * `createEngine` — the one-call convenience factory for embedding owenloop in a
+ * `createEngine` — the one-call convenience factory for embedding owenwork in a
  * host process.
  *
  * The `Engine` class is the real public API; this just bundles the wiring an
  * embedder would otherwise hand-roll: open the SQLite store, resolve workflow
  * definitions (from a directory or an in-memory set), and hand the engine a
  * resolver. It mirrors what the CLI does in `src/cli.ts` (`openCtx`), so an
- * in-process host and the `owenloop` binary drive the *same* engine the same way
+ * in-process host and the `owenwork` binary drive the *same* engine the same way
  * — one returns typed objects, the other prints them as JSON.
  *
  * Lifecycle: the returned `engine`/`store` are meant to be long-lived (one per
@@ -31,7 +31,7 @@ import type { WorkflowDef } from './types.ts';
 export interface CreateEngineOpts {
   /**
    * SQLite database path. Use `':memory:'` for an ephemeral instance (handy in
-   * tests). Defaults to `.owenloop/state.db` (matching the CLI). Parent
+   * tests). Defaults to `.owenwork/state.db` (matching the CLI). Parent
    * directories are created for a file path.
    */
   db?: string;
@@ -71,7 +71,7 @@ export interface CreatedEngine {
  * `createInstance` / `tick` / `green` / … . See `docs/embedding.md`.
  */
 export function createEngine(opts: CreateEngineOpts = {}): CreatedEngine {
-  const db = opts.db ?? join('.owenloop', 'state.db');
+  const db = opts.db ?? join('.owenwork', 'state.db');
   if (db !== ':memory:') mkdirSync(dirname(db), { recursive: true });
   const store = openStore(db);
 

@@ -18,18 +18,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..');
-const BIN = join(ROOT, 'bin', 'owenloop.mjs');
+const BIN = join(ROOT, 'bin', 'owenwork.mjs');
 const EXAMPLES = join(ROOT, 'examples', 'workflows');
 const FIXTURES = join(ROOT, 'test', 'fixtures');
 
 /** A throwing CLI bound to a fresh temp db + a defs dir, plus `.raw` for error paths. */
 function harness(defsDir: string = EXAMPLES) {
-  const db = join(mkdtempSync(join(tmpdir(), 'owenloop-edge-')), 'state.db');
+  const db = join(mkdtempSync(join(tmpdir(), 'owenwork-edge-')), 'state.db');
   const run = (...args: string[]) =>
     spawnSync(process.execPath, [BIN, ...args, '--db', db, '--defs', defsDir], { encoding: 'utf8' });
   const ow = (...args: string[]): any => {
     const r = run(...args);
-    if (r.status !== 0) throw new Error(`owenloop ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
+    if (r.status !== 0) throw new Error(`owenwork ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
     const out = r.stdout.trim();
     return out ? JSON.parse(out) : null;
   };

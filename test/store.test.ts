@@ -329,7 +329,7 @@ test('alarm_at survives a process restart (file-backed round-trip)', () => {
   // Open a Store on a real file, setAlarm, CLOSE it, REOPEN a new Store on the
   // same file (so migrate() runs again), and assert getAlarm returns the stored
   // value. This verifies that alarm_at persists across process restarts.
-  const dir = mkdtempSync(join(tmpdir(), 'owenloop-store-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'owenwork-store-test-'));
   const dbPath = join(dir, 'test.db');
   const wf = randId('wf');
   const step = 'completion';
@@ -410,7 +410,7 @@ test('findChildByParent returns undefined when no match', () => {
 // ---- concurrent-writer CAS tests (node:sqlite BEGIN IMMEDIATE) ---------------
 
 test('tx() CAS: second writer detects fingerprint change and does not commit', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'owenloop-cas-'));
+  const dir = mkdtempSync(join(tmpdir(), 'owenwork-cas-'));
   const dbPath = join(dir, 'cas.db');
   try {
     const s1 = new Store(dbPath);
@@ -467,7 +467,7 @@ test('tx() CAS: second writer detects fingerprint change and does not commit', (
 });
 
 test('tx() BEGIN IMMEDIATE: second connection is blocked at BEGIN, not mid-write', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'owenloop-imm-'));
+  const dir = mkdtempSync(join(tmpdir(), 'owenwork-imm-'));
   const dbPath = join(dir, 'imm.db');
   try {
     const db1 = new DatabaseSync(dbPath);

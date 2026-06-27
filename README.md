@@ -1,19 +1,36 @@
-# owenloop
+# owenwork
 
-[![CI](https://github.com/typicalday/owenloop/actions/workflows/ci.yml/badge.svg)](https://github.com/typicalday/owenloop/actions/workflows/ci.yml)
+[![CI](https://github.com/typicalday/owenwork/actions/workflows/ci.yml/badge.svg)](https://github.com/typicalday/owenwork/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**owenloop runs multi-step agent workflows.** You describe a pipeline of steps in
-a YAML file — usually one AI agent per step — and owenloop works out what's ready
-to run, hands you one job at a time, and keeps the whole pipeline honest as things
-change. It's the memory and the coordination between agent runs; you bring the
-agents.
+**owenwork is the deterministic engine for your owen loop.** You describe a pipeline
+of steps in a YAML file — usually one AI agent per step — and owenwork works out
+what's ready to run, hands you one job at a time, and keeps the whole pipeline honest
+as things change. Agents are probabilistic; owenwork is the part that isn't. It's the
+deterministic rails your agents run on — the memory, the checkpoints, and the brakes —
+so a loop of agents can run unattended without wandering off. You bring the agents.
 
 It was built for AI agent workflows — a planner agent writes a plan, a builder
 agent turns it into a PR, a reviewer agent checks it, a merger ships it — but the
 engine doesn't know what a "PR" or a "plan" is. Any multi-step process where steps
 depend on each other fits: research pipelines, data processing, document review,
 triage.
+
+## What is an owen loop?
+
+A [Ralph loop](https://ghuntley.com/ralph/) keeps an agent ticking with fresh context
+each pass, re-deriving everything from scratch — it offroads. An **owen loop** puts
+that agent on deterministic rails: owenwork holds the route, the checkpoints, the
+guardrails, and the stop condition, all computed and reproducible. The agent stops
+navigating and just drives the next segment. The probabilistic part shrinks to "do
+this one job well"; everything around it is certain — which is what lets you walk away
+and still trust (and audit) the result.
+
+That's the whole pitch: **owenwork is the part of your agent loop that doesn't
+hallucinate.** An unaided agent has to navigate *and* drive on every pass, and can
+blow either one. owenwork paves the road once — what runs next, what just went stale,
+what's done, when to stop — so the agent is demoted from navigator to driver. The loop
+is the muscle; owenwork is the memory and the discipline.
 
 ```yaml
 # delivery.yaml — a four-step agent pipeline
@@ -43,7 +60,7 @@ retrying the right number of times, and knowing when to stop. Wire a few agents
 together by hand and you end up writing a pile of glue — who runs next, what to
 re-run when something upstream moves, when to give up and ask a human.
 
-owenloop is that glue, written once and tested hard. You declare the steps; it
+owenwork is that glue, written once and tested hard. You declare the steps; it
 handles the three things that are tedious to get right:
 
 - **What runs next.** A step is ready the moment everything it depends on is
@@ -52,13 +69,13 @@ handles the three things that are tedious to get right:
 - **What to re-run.** Change an early step's output and everything built on it
   automatically falls back to "not done." No manual invalidation, no stale results
   slipping through.
-- **When to stop.** If a step keeps getting rejected past its limit, owenloop stops
+- **When to stop.** If a step keeps getting rejected past its limit, owenwork stops
   re-running it and flags it for a human — instead of looping forever burning
   tokens.
 
 ### The mental model: owed, not done
 
-owenloop doesn't track whether a step is "running" or "done." It tracks what each
+owenwork doesn't track whether a step is "running" or "done." It tracks what each
 step **owes**. Every output is in one of five states:
 
 | state       | still owed? | meaning                                                          |
@@ -86,49 +103,50 @@ Three things make this more than running steps in dependency order:
   change cascading downstream.)
 - **It knows when to give up.** If an output is rejected more times than its step's
   `maxAttempts`, the engine stops re-arming it. It stays a debt but produces no more
-  jobs — the step has demonstrably failed and a human is needed. `owenloop retry`
+  jobs — the step has demonstrably failed and a human is needed. `owenwork retry`
   resets the counter (optionally with new guidance).
 
 That's the core. Collections add fan-out/fan-in (a step emits N items, a `map` runs
 once per item, a `reduce` runs once they're all in) — see
 [`research`](examples/workflows/research.yaml).
 
-### Driving it with a loop
+### Driving it — the owen loop
 
-owenloop never runs anything itself. It hands out jobs and waits to hear back —
+owenwork never runs anything itself. It hands out jobs and waits to hear back —
 something has to tick it, run the work, and report the result. That something can be
 as simple as a `while` loop around an agent. The [Ralph
 technique](https://ghuntley.com/ralph/) — keep an agent ticking with a fresh context
-each pass — is exactly this kind of outer loop, and owenloop is the half it's
-missing: the persistent state and the brakes. The loop keeps going; owenloop
-remembers what's owed, what failed and why, and when the whole thing is actually
-done. They work side by side — the loop is the muscle, owenloop is the memory.
+each pass — is exactly this kind of outer loop, and owenwork is the half it's
+missing: the persistent state and the brakes. Wire the two together and you have an
+**owen loop** — the loop keeps going; owenwork remembers what's owed, what failed and
+why, and when the whole thing is actually done. They work side by side: the loop is
+the muscle, owenwork is the memory and the discipline.
 
 ---
 
 ## Requirements
 
-- **Node ≥ 22.6.** owenloop runs TypeScript directly via Node's built-in type
+- **Node ≥ 22.6.** owenwork runs TypeScript directly via Node's built-in type
   stripping — there's no build step.
 - **No native dependencies.** Storage is Node's built-in `node:sqlite`, so there's
   nothing to compile. The only runtime deps are `yaml` (parsing defs) and
   `@cfworker/json-schema` (optional per-artifact schema validation).
 
 ```sh
-git clone https://github.com/typicalday/owenloop && cd owenloop
+git clone https://github.com/typicalday/owenwork && cd owenwork
 npm install
 npm run check     # typecheck + full test suite
 ```
 
-Or use it as a dependency — owenloop ships its TypeScript source (no build step), so
+Or use it as a dependency — owenwork ships its TypeScript source (no build step), so
 you just need a Node ≥ 22.6 ESM host:
 
 ```sh
-npm install owenloop
+npm install owenwork
 ```
 
 ```ts
-import { createEngine } from 'owenloop';   // see "Embedding it" below
+import { createEngine } from 'owenwork';   // see "Embedding it" below
 ```
 
 ---
@@ -144,35 +162,35 @@ The [`examples/workflows`](examples/workflows) folder has a workflow per idea:
 Every command prints JSON, so the snippet below pipes through `jq`.
 
 ```sh
-export OWENLOOP_DEFS=examples/workflows
-export OWENLOOP_DB=/tmp/owenloop-demo.db
+export OWENWORK_DEFS=examples/workflows
+export OWENWORK_DB=/tmp/owenwork-demo.db
 
-owenloop defs                                  # what workflows are available
+owenwork defs                                  # what workflows are available
 
 # start an instance; `proposal` is seeded as owed, so we provide it up front
-wf=$(owenloop create delivery \
+wf=$(owenwork create delivery \
        --provide proposal='{"text":"add dark mode"}' | jq -r .workflow)
 
 # the worker loop: tick → run → report
-run=$(owenloop tick $wf | jq -r '.orders[0].run')   # claim the planner job
-owenloop green $wf $run plan --value '{"plan":"…"}'  # report its output
+run=$(owenwork tick $wf | jq -r '.orders[0].run')   # claim the planner job
+owenwork green $wf $run plan --value '{"plan":"…"}'  # report its output
 
-owenloop status $wf                            # owed / eligible / blocked / done
+owenwork status $wf                            # owed / eligible / blocked / done
 ```
 
-`owenloop` here is `node bin/owenloop.mjs` — run that directly, use the `npm run
-owenloop --` script, or `npm link` to put `owenloop` on your PATH.
+`owenwork` here is `node bin/owenwork.mjs` — run that directly, use the `npm run
+owenwork --` script, or `npm link` to put `owenwork` on your PATH.
 
 **A knock-back.** When the reviewer's job comes up, instead of greening its `verdict`
 you can reject the PR:
 
 ```sh
-owenloop reject $wf pr --by reviewer --text "tests are missing"
+owenwork reject $wf pr --by reviewer --text "tests are missing"
 ```
 
 That re-arms `builder` with the reason attached to its next job. Do it past
-`builder`'s `maxAttempts` and `pr` **stalls** — owenloop stops re-arming it and waits
-for a human. `owenloop retry $wf pr --text "use the new fixture"` clears the stall and
+`builder`'s `maxAttempts` and `pr` **stalls** — owenwork stops re-arming it and waits
+for a human. `owenwork retry $wf pr --text "use the new fixture"` clears the stall and
 resets the counter.
 
 Each example's header comment walks through its commands end to end.
@@ -181,8 +199,8 @@ Each example's header comment walks through its commands end to end.
 
 ## CLI reference
 
-Global flags: `--db <path>` (env `OWENLOOP_DB`, default `.owenloop/state.db`) and
-`--defs <dir>` (env `OWENLOOP_DEFS`, default `./workflows`).
+Global flags: `--db <path>` (env `OWENWORK_DB`, default `.owenwork/state.db`) and
+`--defs <dir>` (env `OWENWORK_DEFS`, default `./workflows`).
 
 | command | what it does |
 |---|---|
@@ -244,10 +262,10 @@ is an ordinary class, so you can drive it **in-process** and get typed objects b
 (`Order`, `CommitResult`, `WorkflowStatus`) — no subprocess, no JSON parsing.
 
 ```ts
-import { createEngine } from 'owenloop';
+import { createEngine } from 'owenwork';
 
 const { engine, store } = createEngine({
-  db: '.owenloop/state.db',         // or ':memory:' for an ephemeral instance
+  db: '.owenwork/state.db',         // or ':memory:' for an ephemeral instance
   defsDir: 'workflows',             // load YAML defs from a dir … or pass `defs: [myDef]`
 });
 
@@ -341,7 +359,7 @@ steps:
 
 ### `produces:` vs `generates:`
 
-A stem under `produces:` is expected to be consumed downstream — owenloop's lint warns
+A stem under `produces:` is expected to be consumed downstream — owenwork's lint warns
 if nothing consumes it. A stem under `generates:` is deliberately consumed by nothing
 (an audit log, an external artifact, a stub); lint leaves it alone. Generated artifacts
 are otherwise identical: schema-validated, fingerprinted, greenable, and visible in
@@ -491,7 +509,7 @@ validator enforces this at load time, so you don't hit it as a runtime surprise.
 
 ## How it's built
 
-owenloop is small and split along a pure-core / imperative-shell line:
+owenwork is small and split along a pure-core / imperative-shell line:
 
 | module | responsibility |
 |---|---|
@@ -532,7 +550,7 @@ npm run check     # both
 The suite is **432 tests**: unit tests (`paths`, `store`, `model`, `defs`, `schema`,
 `util`, `cli`), engine integration tests (the cascade, the stall, schema validation,
 the concurrency check), and **49 end-to-end tests** that spawn the real
-`bin/owenloop.mjs` binary and drive the example workflows through their full lifecycles.
+`bin/owenwork.mjs` binary and drive the example workflows through their full lifecycles.
 
 Two e2e files carry most of the weight, by opposite intent.
 [`test/edge.e2e.test.ts`](test/edge.e2e.test.ts) is a 26-case edge battery aimed at the
@@ -552,7 +570,7 @@ open job, repeated failures trip the stall and a `retry` clears it.
 
 ## Design reference
 
-owenloop is a faithful, decoupled implementation of an internal dataflow-engine spec.
+owenwork is a faithful, decoupled implementation of an internal dataflow-engine spec.
 [`docs/design.md`](docs/design.md) is a self-contained walkthrough — the lifecycle,
 firing rule, forward cascade, the reject kinds, the liveness rules, and the concurrency
 model — cross-referenced from the source.

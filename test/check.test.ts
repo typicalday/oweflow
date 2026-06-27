@@ -465,11 +465,11 @@ test('modelCheck: completePath is set when completable', () => {
 const EXAMPLES = join(import.meta.dirname, '..', 'examples', 'workflows');
 
 function makeCli(opts: { defs?: string } = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'owenloop-check-'));
+  const home = mkdtempSync(join(tmpdir(), 'owenwork-check-'));
   const db = join(home, 'state.db');
   const env: Record<string, string | undefined> = {
-    OWENLOOP_DEFS: opts.defs ?? EXAMPLES,
-    OWENLOOP_DB: db,
+    OWENWORK_DEFS: opts.defs ?? EXAMPLES,
+    OWENWORK_DB: db,
   };
   const run = (...argv: string[]) => {
     const out: string[] = [];
@@ -486,7 +486,7 @@ test('CLI check: text format on delivery (has seedOwed=true → deadlock)', () =
   const r = run('check', 'delivery');
   // deadlock + exhaustive → exit 1
   assert.equal(r.code, 1, 'definite deadlock → exit 1');
-  assert.match(r.out, /owenloop check: delivery/);
+  assert.match(r.out, /owenwork check: delivery/);
   assert.match(r.out, /Deadlocks/);
 });
 
@@ -505,7 +505,7 @@ test('CLI check: json format emits structured report', () => {
 test('CLI check: bounded search shows SEARCH INCOMPLETE banner and exits 0', () => {
   // Use the tiny healthy def (seedOwed=false) with a very tight maxStates so it
   // gets truncated before exhausting the space.
-  const defsDir = mkdtempSync(join(tmpdir(), 'owenloop-bounded-'));
+  const defsDir = mkdtempSync(join(tmpdir(), 'owenwork-bounded-'));
   writeFileSync(
     join(defsDir, 'tiny.yaml'),
     [
@@ -536,7 +536,7 @@ test('CLI check: unknown def exits 1 with known-names list', () => {
 
 test('CLI check: a def with definite deadlock exits 1 when exhaustive', () => {
   // Write a deadlocker.yaml to a temp defs dir
-  const defsDir = mkdtempSync(join(tmpdir(), 'owenloop-defs-'));
+  const defsDir = mkdtempSync(join(tmpdir(), 'owenwork-defs-'));
   writeFileSync(
     join(defsDir, 'deadlocker.yaml'),
     [
@@ -565,7 +565,7 @@ test('CLI check: a def with definite deadlock exits 1 when exhaustive', () => {
 test('CLI check: completable healthy def (seedOwed=false, maxSchemaFailures: 0) exits 0 and shows "Completable: yes"', () => {
   // Write a tiny healthy def with maxSchemaFailures: 0 (disables schema stall).
   // This ensures schema-reject paths never deadlock, giving a clean "OK" result.
-  const defsDir = mkdtempSync(join(tmpdir(), 'owenloop-healthy-'));
+  const defsDir = mkdtempSync(join(tmpdir(), 'owenwork-healthy-'));
   writeFileSync(
     join(defsDir, 'tiny.yaml'),
     [
@@ -585,7 +585,7 @@ test('CLI check: completable healthy def (seedOwed=false, maxSchemaFailures: 0) 
   const r = run('check', 'tiny');
   assert.equal(r.code, 0, 'clean exhaustive search → exit 0');
   assert.match(r.out, /Completable: yes/);
-  assert.match(r.out, /owenloop check: tiny/);
+  assert.match(r.out, /owenwork check: tiny/);
 });
 
 // ---- Part 4: evalInvariantPredicate unit tests (§3.2) -------------------------
@@ -835,11 +835,11 @@ test('modelCheck: bounded-still-reports — depth-0 violation with tiny bounds',
 // ---- Part 6: CLI invariant tests (§3.4) ----------------------------------------
 
 function makeInvCli(yaml: string, defName: string) {
-  const defsDir = mkdtempSync(join(tmpdir(), 'owenloop-inv-'));
+  const defsDir = mkdtempSync(join(tmpdir(), 'owenwork-inv-'));
   writeFileSync(join(defsDir, `${defName}.yaml`), yaml);
-  const home = mkdtempSync(join(tmpdir(), 'owenloop-inv-home-'));
+  const home = mkdtempSync(join(tmpdir(), 'owenwork-inv-home-'));
   const db = join(home, 'state.db');
-  const env: Record<string, string | undefined> = { OWENLOOP_DEFS: defsDir, OWENLOOP_DB: db };
+  const env: Record<string, string | undefined> = { OWENWORK_DEFS: defsDir, OWENWORK_DB: db };
   const run = (...argv: string[]) => {
     const out: string[] = [];
     const err: string[] = [];

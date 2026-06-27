@@ -1,16 +1,16 @@
 # New-hire onboarding wiring — a long-running, pause/resume coordinator.
 #
 # A re-creation of Google's ADK "long-running agent that pauses, resumes, and
-# never loses context" onboarding example, expressed in owenloop's dataflow
+# never loses context" onboarding example, expressed in owenwork's dataflow
 # model. The ADK version is a six-state machine (START → WELCOME_SENT →
 # DOCUMENTS_SIGNED → IT_PROVISIONED → HARDWARE_DELIVERED → COMPLETED) whose
 # whole point is the *idle time*: long dormant waits for a human signature and
 # for a shipping confirmation.
 #
-# owenloop needs no state column for that. Each external wait is just an
+# owenwork needs no state column for that. Each external wait is just an
 # artifact *owed by an external producer* — a `seedOwed` input. The step that
 # consumes it sits as a debt ("dormant") and produces no orders until a webhook
-# fulfills the input with `owenloop provide`. That is the pause; the next `tick`
+# fulfills the input with `owenwork provide`. That is the pause; the next `tick`
 # is the resume. Context never replays — the new-hire details live in the
 # `hire` artifact and every order carries its captured `consumes` (§ store).
 #
@@ -28,26 +28,26 @@
 # webhook arrives those steps are blocked debts that emit no work.
 #
 # Drive it (the worker step; webhooks are the two `provide` calls):
-#   wf=$(owenloop create onboarding \
+#   wf=$(owenwork create onboarding \
 #          --provide hire='{"name":"Ada Lovelace","email":"ada@corp.com","start_date":"2026-07-01"}' \
 #          | jq -r .workflow)
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `send_welcome`
-#   owenloop green $wf $run welcome_packet --value '{"sent":true,"packet_url":"https://hr/welcome/ada"}'
-#   owenloop status $wf            # `provision_it` is blocked: dormant, awaiting the signature webhook
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `send_welcome`
+#   owenwork green $wf $run welcome_packet --value '{"sent":true,"packet_url":"https://hr/welcome/ada"}'
+#   owenwork status $wf            # `provision_it` is blocked: dormant, awaiting the signature webhook
 #
 #   # … hours/days later, the HR portal POSTs /webhooks/document_signed → the worker runs:
-#   owenloop provide $wf signed_documents --value '{"contract_id":"C-1029","signed_at":"2026-06-20"}'
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `provision_it` (it_agent)
-#   owenloop green $wf $run it_accounts --value '{"email_provisioned":true,"laptop_ordered":true}'
-#   owenloop status $wf            # `confirm_hardware` is now the dormant debt
+#   owenwork provide $wf signed_documents --value '{"contract_id":"C-1029","signed_at":"2026-06-20"}'
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `provision_it` (it_agent)
+#   owenwork green $wf $run it_accounts --value '{"email_provisioned":true,"laptop_ordered":true}'
+#   owenwork status $wf            # `confirm_hardware` is now the dormant debt
 #
 #   # … shipping POSTs the hardware-delivered webhook → the worker runs:
-#   owenloop provide $wf hardware_delivered --value '{"tracking":"1Z999","delivered_at":"2026-06-28"}'
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `confirm_hardware`
-#   owenloop green $wf $run hardware_ready --value '{"asset_tag":"LT-4471","verified":true}'
-#   run=$(owenloop tick $wf | jq -r '.orders[0].run')              # -> order for `send_day_one`
-#   owenloop green $wf $run day_one_schedule --value '{"sent":true,"first_meeting":"09:30"}' --terminal
-#   owenloop status $wf            # done
+#   owenwork provide $wf hardware_delivered --value '{"tracking":"1Z999","delivered_at":"2026-06-28"}'
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `confirm_hardware`
+#   owenwork green $wf $run hardware_ready --value '{"asset_tag":"LT-4471","verified":true}'
+#   run=$(owenwork tick $wf | jq -r '.orders[0].run')              # -> order for `send_day_one`
+#   owenwork green $wf $run day_one_schedule --value '{"sent":true,"first_meeting":"09:30"}' --terminal
+#   owenwork status $wf            # done
 
 name: onboarding
 title: New-hire onboarding coordinator

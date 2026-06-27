@@ -8,13 +8,13 @@
 # — it drops out of the reduce without blocking it.
 #
 # Drive it:
-#   wf=$(owenloop create research --provide question='{"q":"why is the sky blue"}' | jq -r .workflow)
-#   owenloop tick $wf                                   # -> order for `gather`
-#   owenloop emit $wf <run> --items '[{"url":"a"},{"url":"b"}]'
-#   owenloop seal $wf <run>                             # done emitting
-#   owenloop tick $wf                                   # -> per-element `check` orders
+#   wf=$(owenwork create research --provide question='{"q":"why is the sky blue"}' | jq -r .workflow)
+#   owenwork tick $wf                                   # -> order for `gather`
+#   owenwork emit $wf <run> --items '[{"url":"a"},{"url":"b"}]'
+#   owenwork seal $wf <run>                             # done emitting
+#   owenwork tick $wf                                   # -> per-element `check` orders
 #   ...
-#   owenloop retract $wf 'gather.source[1]' --by human --text "paywalled"
+#   owenwork retract $wf 'gather.source[1]' --by human --text "paywalled"
 
 name: research
 title: Research synthesis
@@ -22,7 +22,7 @@ description: Gather sources (collection), fact-check each (map), synthesize (red
 
 inputs:
   - name: question
-    seedOwed: true          # required: supply with --provide or `owenloop provide`
+    seedOwed: true          # required: supply with --provide or `owenwork provide`
 
 steps:
   - name: gather

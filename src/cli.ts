@@ -1,5 +1,5 @@
 /**
- * The owenloop CLI — a thin, scriptable surface over the engine.
+ * The owenwork CLI — a thin, scriptable surface over the engine.
  *
  * Every data command prints JSON to stdout, so a *wiring* (the worker/automation
  * that actually runs orders) can drive the engine programmatically: `tick` to
@@ -7,25 +7,25 @@
  * report outcomes. The engine itself is domain-neutral; this binary just maps
  * argv to engine calls.
  *
- *   owenloop defs                       list available workflow definitions
- *   owenloop create <def> [--provide n=json] [--title t]   start an instance
- *   owenloop provide <wf> <name> [--value json]   supply an owed input
- *   owenloop tick <wf> [--now ms]       pull eligible orders
- *   owenloop status <wf>                derive debts / eligible / blocked
- *   owenloop status --all               every instance's status in one call (fleet read)
- *   owenloop show <wf>                  dump raw artifacts (debugging)
- *   owenloop list                       list instances
- *   owenloop green <wf> <run> <path> [--value json] [--terminal]
- *   owenloop emit  <wf> <run> --items '[{...},{...}]'
- *   owenloop seal  <wf> <run> [--value json]
- *   owenloop reject  <wf> <path> --by <author> --text <msg>
- *   owenloop retract <wf> <path> --by <author> --text <msg>
- *   owenloop skip    <wf> <path> --by <author> --text <msg>
- *   owenloop retry   <wf> <path> [--by <author>] [--text <guidance>]   clear a stall
- *   owenloop close <wf> <run> [--outcome ok|no_work|failed|skipped] [--summary s]
- *   owenloop delete <wf>
+ *   owenwork defs                       list available workflow definitions
+ *   owenwork create <def> [--provide n=json] [--title t]   start an instance
+ *   owenwork provide <wf> <name> [--value json]   supply an owed input
+ *   owenwork tick <wf> [--now ms]       pull eligible orders
+ *   owenwork status <wf>                derive debts / eligible / blocked
+ *   owenwork status --all               every instance's status in one call (fleet read)
+ *   owenwork show <wf>                  dump raw artifacts (debugging)
+ *   owenwork list                       list instances
+ *   owenwork green <wf> <run> <path> [--value json] [--terminal]
+ *   owenwork emit  <wf> <run> --items '[{...},{...}]'
+ *   owenwork seal  <wf> <run> [--value json]
+ *   owenwork reject  <wf> <path> --by <author> --text <msg>
+ *   owenwork retract <wf> <path> --by <author> --text <msg>
+ *   owenwork skip    <wf> <path> --by <author> --text <msg>
+ *   owenwork retry   <wf> <path> [--by <author>] [--text <guidance>]   clear a stall
+ *   owenwork close <wf> <run> [--outcome ok|no_work|failed|skipped] [--summary s]
+ *   owenwork delete <wf>
  *
- * Global: --db <path> (env OWENLOOP_DB), --defs <dir> (env OWENLOOP_DEFS).
+ * Global: --db <path> (env OWENWORK_DB), --defs <dir> (env OWENWORK_DEFS).
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
@@ -157,8 +157,8 @@ interface Ctx {
 }
 
 function openCtx(io: CliIO, args: Args): Ctx {
-  const dbPath = last(args, 'db') ?? io.env.OWENLOOP_DB ?? join(io.cwd, '.owenloop', 'state.db');
-  const defsDir = last(args, 'defs') ?? io.env.OWENLOOP_DEFS ?? join(io.cwd, 'workflows');
+  const dbPath = last(args, 'db') ?? io.env.OWENWORK_DB ?? join(io.cwd, '.owenwork', 'state.db');
+  const defsDir = last(args, 'defs') ?? io.env.OWENWORK_DEFS ?? join(io.cwd, 'workflows');
   mkdirSync(dirname(dbPath), { recursive: true });
   const store = openStore(dbPath);
   const defs = existsSync(defsDir) ? loadDefs(defsDir) : new Map<string, WorkflowDef>();
@@ -176,9 +176,9 @@ function print(io: CliIO, value: unknown): void {
 
 // ---- commands ----------------------------------------------------------------
 
-const USAGE = `owenloop — a dataflow workflow engine
+const USAGE = `owenwork — a dataflow workflow engine
 
-Usage: owenloop <command> [args] [--db <path>] [--defs <dir>]
+Usage: owenwork <command> [args] [--db <path>] [--defs <dir>]
 
 Commands:
   defs                                   list available workflow definitions
@@ -205,7 +205,7 @@ Commands:
   close <wf> <run> [--outcome ok|no_work|failed|skipped] [--summary s]
   delete <wf>
 
-Environment: OWENLOOP_DB, OWENLOOP_DEFS`;
+Environment: OWENWORK_DB, OWENWORK_DEFS`;
 
 function dispatch(command: string, io: CliIO, args: Args): number {
   // help and lint need no store
@@ -215,7 +215,7 @@ function dispatch(command: string, io: CliIO, args: Args): number {
   }
 
   if (command === 'lint') {
-    const defsDir = last(args, 'defs') ?? io.env.OWENLOOP_DEFS ?? join(io.cwd, 'workflows');
+    const defsDir = last(args, 'defs') ?? io.env.OWENWORK_DEFS ?? join(io.cwd, 'workflows');
     const defs = existsSync(defsDir) ? loadDefsRaw(defsDir) : new Map<string, WorkflowDef>();
     const defName = args.positionals[1];
     let hasErrors = false;
@@ -240,7 +240,7 @@ function dispatch(command: string, io: CliIO, args: Args): number {
   }
 
   if (command === 'check') {
-    const defsDir = last(args, 'defs') ?? io.env.OWENLOOP_DEFS ?? join(io.cwd, 'workflows');
+    const defsDir = last(args, 'defs') ?? io.env.OWENWORK_DEFS ?? join(io.cwd, 'workflows');
     const defs = existsSync(defsDir) ? loadDefsRaw(defsDir) : new Map<string, WorkflowDef>();
     const defName = need(args, 1, 'def');
     const def = defs.get(defName);
@@ -276,7 +276,7 @@ function dispatch(command: string, io: CliIO, args: Args): number {
       const clean = report.deadlocks.length === 0 && report.stuck.length === 0
         && report.invariantViolations.length === 0;
       const status = clean && report.completable ? 'OK' : clean ? 'INCOMPLETE' : 'DEFECTS FOUND';
-      io.out(`=== owenloop check: ${def.name} ===`);
+      io.out(`=== owenwork check: ${def.name} ===`);
       io.out(`Status: ${status}`);
       io.out(`Completable: ${report.completable ? 'yes' : 'no'}`);
       io.out(`States explored: ${report.stats.statesExplored}, max depth: ${report.stats.depthReached}`);
