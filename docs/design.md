@@ -913,18 +913,22 @@ being caught the moment it's loaded.
 ### §27.1 `engine:` — a declared compatibility contract
 
 A definition may declare `engine: <n>` at the top level. `buildDef` coerces
-and checks it via `asEngineVersion`: it must be a positive integer equal to
-`SUPPORTED_ENGINE_VERSION` (defs.ts), a constant bumped whenever a future
+and checks it via `asEngineVersion`: it must be a positive integer no greater
+than `SUPPORTED_ENGINE_VERSION` (defs.ts), a constant bumped whenever a future
 engine generation makes a breaking change to definition semantics. Omitting
 `engine:` defaults to `SUPPORTED_ENGINE_VERSION` — every `WorkflowDef` in
 memory carries a definite `engine: number` (the field is required on the
 type, never `undefined`), but no existing definition needs to change to keep
 working.
 
-A mismatch — an author running a definition authored against a different
-engine generation — is a `DefError` at load time, before any instance is
-created, rather than a confusing failure mid-run once the engine's actual
-behavior diverges from what the definition assumes.
+The check is deliberately `>`, not `!==`: a definition declaring an older
+supported `engine:` (or omitting it) must keep loading unchanged even after
+`SUPPORTED_ENGINE_VERSION` is bumped — only a definition that requests a
+version *ahead* of what the running binary understands is an error. That
+error — `workflow '<name>' requires engine version <n> but this owenloop
+only supports up to <max> — upgrade owenloop` — fires at load time, before
+any instance is created, rather than as a confusing failure mid-run once the
+engine's actual behavior diverges from what the definition assumes.
 
 `engine:` is checked **per file**, not across `include:`/`calls:` edges: each
 YAML file is parsed by its own `buildDef` call, independently of any parent

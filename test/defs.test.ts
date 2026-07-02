@@ -1685,7 +1685,11 @@ test('§25 (2) engine: 1 (the supported version) is accepted', () => {
 test('§25 (3) engine: 2 (an unsupported version) throws DefError', () => {
   assert.throws(
     () => buildDef({ ...delivery, engine: 2 }),
-    (e: unknown) => e instanceof DefError && /not supported/.test((e as Error).message),
+    (e: unknown) =>
+      e instanceof DefError &&
+      /requires engine version 2/.test((e as Error).message) &&
+      /only supports up to 1/.test((e as Error).message) &&
+      /upgrade owenloop/.test((e as Error).message),
   );
 });
 

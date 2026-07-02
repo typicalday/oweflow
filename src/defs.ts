@@ -192,18 +192,24 @@ function asSchema(v: unknown, ctx: string): JsonSchema {
 }
 /**
  * Coerce + validate a raw `engine:` value (§25): must be a positive integer
- * equal to SUPPORTED_ENGINE_VERSION. Defaults to SUPPORTED_ENGINE_VERSION
+ * no greater than SUPPORTED_ENGINE_VERSION. Defaults to SUPPORTED_ENGINE_VERSION
  * when omitted, so every WorkflowDef in memory carries a definite, checked
  * `engine` number — never `undefined` — regardless of whether the author
- * wrote `engine:` at all.
+ * wrote `engine:` at all. Using a `>` (not `!==`) comparison against the max
+ * keeps this forward-compatible: once SUPPORTED_ENGINE_VERSION is bumped past
+ * 1, older defs that still declare `engine: 1` (or omit it) must keep loading
+ * exactly as before — only defs requesting a version the running binary
+ * doesn't yet support should be rejected.
  */
-function asEngineVersion(v: unknown, ctx: string): number {
+function asEngineVersion(v: unknown, name: string): number {
   if (v === undefined) return SUPPORTED_ENGINE_VERSION;
   if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
-    throw new DefError(`${ctx} must be a positive integer`);
+    throw new DefError(`workflow '${name}': engine must be a positive integer`);
   }
-  if (v !== SUPPORTED_ENGINE_VERSION) {
-    throw new DefError(`${ctx}: ${v} is not supported by this build (supports engine: ${SUPPORTED_ENGINE_VERSION})`);
+  if (v > SUPPORTED_ENGINE_VERSION) {
+    throw new DefError(
+      `workflow '${name}' requires engine version ${v} but this owenloop only supports up to ${SUPPORTED_ENGINE_VERSION} — upgrade owenloop`,
+    );
   }
   return v;
 }
@@ -503,7 +509,7 @@ export function buildDef(raw: unknown, source?: string, baseDir?: string): Workf
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(name)) {
     throw new DefError(`workflow name '${name}' must be alphanumeric (with - or _)`);
   }
-  const engine = asEngineVersion(r.engine, `workflow '${name}'.engine`);
+  const engine = asEngineVersion(r.engine, name);
 
   const inputs: InputDef[] = (Array.isArray(r.inputs) ? r.inputs : []).map((ri, i) => {
     const raw = ri as RawInput;
