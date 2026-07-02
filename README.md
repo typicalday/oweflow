@@ -159,8 +159,11 @@ The [`examples/workflows`](examples/workflows) folder has a workflow per idea:
 [`delivery`](examples/workflows/delivery.yaml) (a review knock-back loop),
 [`research`](examples/workflows/research.yaml) (collections),
 [`routing`](examples/workflows/routing.yaml) (skip a dead branch),
-[`intake`](examples/workflows/intake.yaml) (schema validation), and
-[`sla-watchdog`](examples/workflows/sla-watchdog.yaml) (idle timers and deadlines).
+[`intake`](examples/workflows/intake.yaml) (schema validation),
+[`sla-watchdog`](examples/workflows/sla-watchdog.yaml) (idle timers and deadlines), and
+[`improve`](examples/workflows/improve.yaml) (a codebase-advisor pipeline
+combining collections, a mid-flight human gate, per-element knock-backs, and
+suffixed-reduce fan-ins).
 Every command prints JSON, so the snippet below pipes through `jq`.
 
 ```sh

@@ -122,12 +122,16 @@ test('terminal: a merged (terminal) output survives an upstream reject; the rest
 // B. Collections: empty / fully-retracted / retract-after-green / blocking (§11)
 // ============================================================================
 
+// Bare-member reduce semantics (gates on members, not verdicts) — the shipped
+// `research` example moved to a suffixed reduce (`gather.source[*].verdict`);
+// this battery drives `test/fixtures/reduce.yaml`, which keeps the bare-reduce
+// shape research.yaml used to have. Callers must use `harness(FIXTURES)`.
 function startResearch(ow: any): string {
-  return ow('create', 'research', '--provide', `question=${J({ q: 'why' })}`).workflow;
+  return ow('create', 'reduce', '--provide', `question=${J({ q: 'why' })}`).workflow;
 }
 
 test('collection: an EMPTY sealed collection still reduces (the engine never counts §11.5)', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   const g = claim(ow, wf, 'gather');
   ow('seal', wf, g.run); // seal with ZERO emitted members
@@ -143,7 +147,7 @@ test('collection: an EMPTY sealed collection still reduces (the engine never cou
 });
 
 test('collection: a fully-retracted collection reduces over the survivors (empty set)', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   const g = claim(ow, wf, 'gather');
   ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
@@ -165,7 +169,7 @@ test('collection: a fully-retracted collection reduces over the survivors (empty
 });
 
 test('collection: retract-after-green tombstones the element and re-derives the draft', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   let g = claim(ow, wf, 'gather');
   ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
@@ -203,7 +207,7 @@ test('collection: retract-after-green tombstones the element and re-derives the 
 });
 
 test('collection: a REJECTED (non-retracted) member blocks the reduce; retracting it unblocks', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   const g = claim(ow, wf, 'gather');
   ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
@@ -331,7 +335,7 @@ test('suffixed reduce: a re-armed child after green knocks the reduce output bac
 });
 
 test('collection: emit accretes after the highest index across calls', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   const g = claim(ow, wf, 'gather');
   const first = ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
@@ -342,7 +346,7 @@ test('collection: emit accretes after the highest index across calls', () => {
 });
 
 test('collection: emit on a stale run (input moved) born-rejects the seal, creates nothing', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   const g = claim(ow, wf, 'gather'); // snapshots question@v1
   ow('reject', wf, 'question', '--by', 'gather', '--text', 'question changed underneath us');
@@ -355,7 +359,7 @@ test('collection: emit on a stale run (input moved) born-rejects the seal, creat
 });
 
 test('collection: seal on a stale run (input moved) is born-rejected', () => {
-  const ow = harness();
+  const ow = harness(FIXTURES);
   const wf = startResearch(ow);
   const g = claim(ow, wf, 'gather');
   ow('emit', wf, g.run, '--items', J([{ url: 'a' }])); // emit while still fresh

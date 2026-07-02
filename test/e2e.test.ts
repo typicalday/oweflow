@@ -16,6 +16,7 @@ import { exampleDefNames } from './helpers.ts';
 const ROOT = join(import.meta.dirname, '..');
 const BIN = join(ROOT, 'bin', 'owenloop.mjs');
 const DEFS = join(ROOT, 'examples', 'workflows');
+const FIXTURES = join(ROOT, 'test', 'fixtures');
 
 interface RawResult {
   status: number;
@@ -130,9 +131,12 @@ test('delivery: full pipeline with a reviewer knock-back ends green & terminal',
 
 test('research: collection fan-out, retract, born-rejected CAS, and reduce re-derivation', () => {
   const db = tmpDb();
-  const ow = makeCli(db);
+  // Bare-member reduce semantics (gates on members, not verdicts) — the
+  // shipped `research` example moved to a suffixed reduce
+  // (`gather.source[*].verdict`); this fixture keeps the bare-reduce shape.
+  const ow = makeCliAgainst(db, FIXTURES);
 
-  const wf = ow('create', 'research', '--provide', `question=${JSON.stringify({ q: 'why is the sky blue' })}`).workflow;
+  const wf = ow('create', 'reduce', '--provide', `question=${JSON.stringify({ q: 'why is the sky blue' })}`).workflow;
 
   // gather: emit a collection, then seal
   let o = orderFor(ow('tick', wf), 'gather');
