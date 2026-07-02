@@ -37,7 +37,7 @@ interface RawInput {
   schema?: unknown;
 }
 /** Hand-maintained key allowlist for RawInput — kept next to the interface so
- *  the two can't silently drift (§25 unknown-key rejection). */
+ *  the two can't silently drift (§26 unknown-key rejection). */
 const RAW_INPUT_KEYS = ['name', 'producer', 'seedOwed', 'schema'] as const;
 
 /** A produce entry: either a bare `"plan"` string, or `{ name, schema, judges }`. */
@@ -149,12 +149,15 @@ const DEFAULTS = {
 } as const;
 
 /**
- * The engine-version contract (§25). A workflow definition may declare
- * `engine: <n>`; it must equal this constant or buildDef throws a DefError —
- * catching an author running a definition written against a different
- * engine generation before any instance is created, rather than failing
- * confusingly mid-run. Omitting `engine:` defaults to this same value (fully
- * backward compatible: no existing definition needs to add it).
+ * The engine-version contract (§26). A workflow definition may declare
+ * `engine: <n>`; it must be a positive integer no greater than this constant
+ * or buildDef throws a DefError — catching an author running a definition
+ * written against a newer engine generation than the one running, before any
+ * instance is created, rather than failing confusingly mid-run. The check is
+ * forward-compatible (`>`, not `!==`): a def declaring an older supported
+ * version keeps loading unchanged even after this constant is bumped.
+ * Omitting `engine:` defaults to this same value (fully backward compatible:
+ * no existing definition needs to add it).
  */
 export const SUPPORTED_ENGINE_VERSION = 1;
 
@@ -191,7 +194,7 @@ function asSchema(v: unknown, ctx: string): JsonSchema {
   return v as JsonSchema;
 }
 /**
- * Coerce + validate a raw `engine:` value (§25): must be a positive integer
+ * Coerce + validate a raw `engine:` value (§26): must be a positive integer
  * no greater than SUPPORTED_ENGINE_VERSION. Defaults to SUPPORTED_ENGINE_VERSION
  * when omitted, so every WorkflowDef in memory carries a definite, checked
  * `engine` number — never `undefined` — regardless of whether the author
@@ -215,7 +218,7 @@ function asEngineVersion(v: unknown, name: string): number {
 }
 
 /**
- * Reject any key on `obj` that isn't in `allowed` (§25). A typo'd or
+ * Reject any key on `obj` that isn't in `allowed` (§26). A typo'd or
  * forward-looking field (e.g. `bodyfile:`, `maxAttepts:`) previously parsed
  * silently and was dropped on the floor — this turns that into a DefError
  * naming the exact offending key(s) and where they were found, instead of a

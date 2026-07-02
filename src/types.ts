@@ -275,9 +275,11 @@ export interface StepDef {
 /** A workflow definition: a set of steps plus declared external inputs. */
 export interface WorkflowDef {
   name: string;
-  /** Declared engine-version contract (§25). Must equal SUPPORTED_ENGINE_VERSION
-   *  (defs.ts) at load time; populated by buildDef so every WorkflowDef in memory
-   *  carries a definite, already-checked version. */
+  /** Declared engine-version contract (§26). Must be a positive integer no
+   *  greater than SUPPORTED_ENGINE_VERSION (defs.ts) at load time (forward-
+   *  compatible: any def requesting a version at or below the running
+   *  binary's supported version loads unchanged); populated by buildDef so
+   *  every WorkflowDef in memory carries a definite, already-checked version. */
   engine: number;
   title?: string;
   description?: string;
