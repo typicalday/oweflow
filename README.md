@@ -97,6 +97,21 @@ That's the core. Collections add fan-out/fan-in (a step emits N items, a `map` r
 once per item, a `reduce` runs once they're all in) — see
 [`research`](examples/workflows/research.yaml).
 
+### What owenloop is not
+
+- **Not a scheduler with its own clock.** `cadence:` and `maxRunsPerDay:`
+  cap how *often* an eligible step can fire, but nothing in owenloop wakes up
+  on a timer — the outer loop (see below) is what initiates every tick.
+- **Not shared state across instances.** Every workflow instance is its own
+  island — artifacts, tasks, and runs are all scoped to one instance. The one
+  deliberate exception is the `calls:`/`producedBy` link (§23) between a
+  parent instance and the child it explicitly spawned.
+- **Not a dynamic graph at runtime.** Collections (see above) give a
+  workflow dynamic *width* — a producer can emit any number of elements —
+  but the wiring graph itself (which steps exist, what each consumes and
+  produces) is fixed when the definition loads, not mutable while an
+  instance runs.
+
 ### Driving it with a loop
 
 owenloop never runs anything itself. It hands out jobs and waits to hear back —
@@ -555,6 +570,20 @@ relative `idleAfter` window and survives a process restart.
 
 A step consumes in exactly one mode — plain, a single map, or a single reduce. The
 validator enforces this at load time, so you don't hit it as a runtime surprise.
+
+### Artifact values are JSON, and secrets don't belong in them
+
+An artifact's `value` is always a JSON object (`Record<string, unknown>`,
+never a raw string or binary blob) — this is enforced by the type, not just
+convention. For anything large or not naturally JSON — a big document, a
+binary file, a build artifact — put a *handle* in the value (`{url: …}`,
+`{path: …}`, `{sha: …}`) that points at the real payload stored elsewhere,
+rather than inlining the payload itself.
+
+Don't put credentials or secrets in an artifact value. Values are persisted
+as plaintext in the SQLite store (no encryption at rest) and are copied
+verbatim into the prompt/context of every order that consumes them — anyone
+who can read the database or a downstream job's prompt can read it.
 
 ---
 

@@ -736,3 +736,58 @@ example (mirrors this shape exactly, plus `examples/workflows/judges/rigor.md`
 for the `bodyFile:` case). `delivery.yaml` is deliberately unchanged — PR
 review there is domain work and stays a `reviewer` step.
 - **Fan-out / many-output children** — D1/D2. The v1 one-output rule is enforced.
+
+### §24.9 A narrower, accepted race: same-judge zombie verdicts
+
+§24.4's CAS check (`judgeCasCheck`) closes every race where the *judged
+artifact itself* moved off `submitted` before a verdict landed — a producer
+resubmit, a sibling judge's reject, or a human bypass. It does not close a
+narrower case: two different *runs of the same judge step* racing on the
+*same* still-`submitted` version.
+
+`reject()` takes no `run` parameter — by design, authority is step-scoped,
+not run-scoped (§4.1: authority follows the consume edge, keyed by actor
+name). Its CAS check therefore validates against whichever run currently
+holds the judge step's task lease, not the specific run instance calling
+`reject()`. The real-world pathway: a judge order is reaped (§24.5 — its task
+goes back to `idle`, attempts increments) but the worker process keeps
+executing anyway, and eventually posts a late verdict — after a fresh run of
+the *same* judge step has already been claimed and is (or has already)
+rendered its own verdict. The stale, "zombie" verdict and the fresh run's
+verdict both read as "the currently-claimed run for this judge step," so the
+CAS check cannot tell them apart. Fully closing this would require a
+breaking signature change (`reject(workflow, path, by, text, run?)`) and is
+left as a known, accepted limitation — see the doc comment on `reject()` in
+`src/engine.ts`.
+
+**Mitigations, for operators running judges with slow or expensive verdict
+agents:**
+
+- Keep `judges: <judgedStem>` steps at `parallel: 1` (the default) so there
+  is only ever one live run of a given judge step at a time. This alone
+  removes the "two different runs" precondition for the race.
+- Set a generous `reapTtl:` on judge steps whose verdict agent is slow —
+  reaping is what creates the zombie in the first place (§24.5); a judge
+  that is legitimately still working should not be reaped out from under
+  itself. A TTL sized to the judge's real worst-case latency, rather than
+  the platform default, keeps `parallel: 1` actually sufficient in practice.
+
+## §25 The model checker (`owenloop check`) — scope
+
+`owenloop check <def>` (see `cli.ts` usage) runs a bounded reachability
+search over `applyOutcome` transitions in `model.ts`, looking for
+deadlocks, stuck artifacts, dead steps, and violations of any declared
+invariants. It is a static analysis of a workflow definition's shape, not a
+simulation of a running instance.
+
+Two things it deliberately does not model, and why: **born-rejected
+commits** — a stale-CAS refusal (§12.2, §24.4) is a refusal, not a state
+transition, so it isn't a reachable state the search should explore; and
+**human overrides** (`green(workflow, 'human', ...)`, §24.6) — a human can
+always force any artifact green, so modeling that as an explorable
+transition would make nearly every workflow trivially "completable,"
+defeating the purpose of running the checker at all. Don't over-trust
+`owenloop check` results for concurrency or liveness questions that hinge on
+either of these — it answers "is this graph structurally sound," not "can a
+human or a stale commit route around a stall." See README's Testing section
+for how `owenloop check` fits alongside the test suite.
