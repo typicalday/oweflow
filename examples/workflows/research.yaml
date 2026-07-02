@@ -3,9 +3,10 @@
 # `gather` produces a *collection* `gather.source[]` (emitting an unknown number
 # of sources, then sealing). `check` MAPS over each element (`gather.source[$i]`
 # -> a per-element `gather.source[$i].verdict`). `synth` REDUCES the whole
-# collection (`gather.source[*]`) into a `draft`, eligible only once the seal is
-# green AND every non-retracted member is green. A bad source can be `retract`ed
-# — it drops out of the reduce without blocking it.
+# collection via a suffixed reduce (`gather.source[*].verdict`), eligible only
+# once the seal is green AND every surviving member's `.verdict` is green. A bad
+# source can be `retract`ed — it drops out of the reduce (member and `.verdict`
+# requirement both) without blocking it.
 #
 # Drive it:
 #   wf=$(owenloop create research --provide question='{"q":"why is the sky blue"}' | jq -r .workflow)
@@ -41,15 +42,16 @@ steps:
       Workflow ${WORKFLOW}, run ${RUN}, element ${INDEX}.
       Fact-check this one source. Green its `.verdict` if it holds up, or
       `retract gather.source[${INDEX}]` if the source is unusable — a retracted
-      element drops out of `synth`'s reduce (and cascades a re-draft if `synth`
-      already ran).
+      element drops out of `synth`'s reduce entirely, member and `.verdict`
+      requirement together (not merely dropping out of a parallel race), and
+      cascades a re-draft if `synth` already ran.
 
   - name: synth
     # REDUCE: eligible once the collection is sealed and every *surviving*
-    # (non-retracted) member is green. It gates on the members, not on `check`'s
-    # verdicts — so `check` runs in parallel, and a later retraction re-derives
-    # the draft via the forward cascade.
-    consumes: ["gather.source[*]"]
+    # (non-retracted) member's `.verdict` is green. It gates on `check`'s
+    # verdicts, not the bare members — so it does NOT fire until every
+    # surviving source has actually been checked.
+    consumes: ["gather.source[*].verdict"]
     produces: [draft]
     body: |
       Workflow ${WORKFLOW}, run ${RUN}.

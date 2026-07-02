@@ -77,8 +77,11 @@ test('§3 map: a single tick claims at most `parallel` element firings', () => {
 });
 
 test('§3 reduce gates on members, not verdicts — a rejected map verdict does not block it', () => {
-  const ow = harness();
-  const wf = ow('create', 'research', '--provide', `question=${J({ q: 'x' })}`).workflow;
+  // Bare-member reduce semantics — the shipped `research` example moved to a
+  // suffixed reduce (`gather.source[*].verdict`); this fixture keeps the
+  // bare-reduce shape research.yaml used to have.
+  const ow = harness(FIXTURES);
+  const wf = ow('create', 'reduce', '--provide', `question=${J({ q: 'x' })}`).workflow;
   const g = find(ow('tick', wf), 'gather');
   ow('emit', wf, g.run, '--items', J([{ u: 'a' }, { u: 'b' }]));
   ow('seal', wf, g.run);
