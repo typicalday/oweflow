@@ -223,6 +223,113 @@ test('collection: a REJECTED (non-retracted) member blocks the reduce; retractin
   ow.cleanup();
 });
 
+// ----------------------------------------------------------------------------
+// B2. Suffixed reduce (`src[*].child`): mirrors the bare-reduce battery above,
+// but gates on a map step's per-element child, not the bare member (§11).
+// ----------------------------------------------------------------------------
+
+function startReduceSuffix(ow: any): string {
+  return ow('create', 'reducesuffix', '--provide', `question=${J({ q: 'why' })}`).workflow;
+}
+
+test('suffixed reduce: an EMPTY sealed collection still reduces (no children required)', () => {
+  const ow = harness(FIXTURES);
+  const wf = startReduceSuffix(ow);
+  const g = claim(ow, wf, 'gather');
+  ow('seal', wf, g.run); // seal with ZERO emitted members
+  ow('close', wf, g.run);
+
+  const s = claim(ow, wf, 'synth');
+  assert.ok(!Object.keys(s.consumes).some((k) => /\[\d+\]/.test(k)), 'no member children — the reduce rests only on the seal');
+  ow('green', wf, s.run, 'draft', '--value', J({ answer: 'none found' }));
+  ow('close', wf, s.run);
+  assert.equal(ow('status', wf).done, true);
+  ow.cleanup();
+});
+
+test("suffixed reduce: fires once every live member's child is green, keyed by child path", () => {
+  const ow = harness(FIXTURES);
+  const wf = startReduceSuffix(ow);
+  const g = claim(ow, wf, 'gather');
+  ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
+  ow('seal', wf, g.run);
+  ow('close', wf, g.run);
+
+  // bare members are born green, but synth must NOT be eligible until their
+  // .formatcheck children are also green (the whole point of the suffix).
+  const t = ow('tick', wf);
+  assert.ok(!t.orders.some((o: any) => o.step === 'synth'), 'children not green yet — reduce not eligible');
+
+  const checks = t.orders.filter((o: any) => o.step === 'formatcheck');
+  assert.equal(checks.length, 2);
+  for (const c of checks) {
+    ow('green', wf, c.run, c.outputs[0], '--value', J({ ok: true }));
+    ow('close', wf, c.run);
+  }
+
+  const s = claim(ow, wf, 'synth');
+  const childKeys = Object.keys(s.consumes).filter((k) => k.endsWith('.formatcheck'));
+  assert.deepEqual(childKeys.sort(), ['gather.source[0].formatcheck', 'gather.source[1].formatcheck']);
+  assert.ok(!Object.keys(s.consumes).some((k) => /\[\d+\]$/.test(k)), 'bare member paths are not in the consumes payload');
+  ow('green', wf, s.run, 'draft', '--value', J({ from: 'a+b' }));
+  ow('close', wf, s.run);
+  assert.equal(ow('status', wf).done, true);
+  ow.cleanup();
+});
+
+test('suffixed reduce: a REJECTED child blocks the reduce even though its bare member is green', () => {
+  const ow = harness(FIXTURES);
+  const wf = startReduceSuffix(ow);
+  const g = claim(ow, wf, 'gather');
+  ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
+  ow('seal', wf, g.run);
+  ow('close', wf, g.run);
+
+  const checks = ow('tick', wf).orders.filter((o: any) => o.step === 'formatcheck');
+  ow('green', wf, checks[0].run, checks[0].outputs[0], '--value', J({ ok: true }));
+  ow('close', wf, checks[0].run);
+  ow('reject', wf, checks[1].outputs[0], '--by', 'human', '--text', 'bad formatting');
+  ow('close', wf, checks[1].run);
+
+  assert.ok(!ow('tick', wf).orders.some((o: any) => o.step === 'synth'), 'a rejected child blocks the reduce');
+  const blocked = ow('status', wf).blocked.find((b: any) => b.step === 'synth');
+  assert.ok(blocked && blocked.blockedOn.includes('gather.source[1].formatcheck'), 'blockedOn names the child, not the bare member');
+
+  // retract the bare member instead → it (and its child) drop out, unblocking synth
+  ow('retract', wf, 'gather.source[1]', '--by', 'human', '--text', 'give up on it');
+  assert.ok(
+    ow('tick', wf).orders.some((o: any) => o.step === 'synth') ||
+    ow('status', wf).eligible.some((f: any) => f.step === 'synth'),
+    'retracting the member unblocks the reduce',
+  );
+  ow.cleanup();
+});
+
+test('suffixed reduce: a re-armed child after green knocks the reduce output back', () => {
+  const ow = harness(FIXTURES);
+  const wf = startReduceSuffix(ow);
+  const g = claim(ow, wf, 'gather');
+  ow('emit', wf, g.run, '--items', J([{ url: 'a' }, { url: 'b' }]));
+  ow('seal', wf, g.run);
+  ow('close', wf, g.run);
+
+  const checks = ow('tick', wf).orders.filter((o: any) => o.step === 'formatcheck');
+  for (const c of checks) {
+    ow('green', wf, c.run, c.outputs[0], '--value', J({ ok: true }));
+    ow('close', wf, c.run);
+  }
+  const s = claim(ow, wf, 'synth');
+  ow('green', wf, s.run, 'draft', '--value', J({ from: 'a+b' }));
+  ow('close', wf, s.run);
+  assert.equal(ow('status', wf).done, true);
+
+  // reject a child after the reduce already greened → draft falls back to a debt
+  ow('reject', wf, 'gather.source[1].formatcheck', '--by', 'human', '--text', 'redo');
+  const draft = art(ow, wf, 'draft');
+  assert.equal(draft.acceptance, 'rejected', 'draft re-armed off the rejected child, not the (still-green) bare member');
+  ow.cleanup();
+});
+
 test('collection: emit accretes after the highest index across calls', () => {
   const ow = harness();
   const wf = startResearch(ow);

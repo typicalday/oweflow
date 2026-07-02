@@ -54,6 +54,10 @@ export function sealStem(path: string): string | null {
 const MAP_RE = /^(.*?)\[\$(\w+)\](.*)$/; // stem [$binder] suffix
 const REDUCE_RE = /^(.*?)\[\*\](.*)$/; // stem [*] suffix
 const COLLECTION_RE = /^(.*?)\[\](.*)$/; // stem [] suffix
+// A suffixed reduce (`src[*].child`) fans in one level deeper — see
+// reduceInputPath in model.ts. "" (bare reduce) or a single ".identifier"
+// segment only; multi-level (".a.b") or malformed suffixes are a parse error.
+const REDUCE_SUFFIX_RE = /^(?:|\.[A-Za-z_][\w-]*)$/;
 
 /** Parse a consume pattern. */
 export function parseConsume(raw: string): ConsumePattern {
@@ -64,10 +68,11 @@ export function parseConsume(raw: string): ConsumePattern {
   }
   m = REDUCE_RE.exec(r);
   if (m) {
-    if ((m[2] as string) !== '') {
-      throw new Error(`reduce pattern must glob the whole set, no suffix: '${raw}'`);
+    const suffix = m[2] as string;
+    if (!REDUCE_SUFFIX_RE.test(suffix)) {
+      throw new Error(`reduce suffix must be empty or a single '.child' level: '${raw}'`);
     }
-    return { raw: r, mode: 'reduce' as ConsumeMode, stem: m[1] as string, suffix: '' };
+    return { raw: r, mode: 'reduce' as ConsumeMode, stem: m[1] as string, suffix };
   }
   if (COLLECTION_RE.test(r) || ELEMENT_RE.test(r)) {
     throw new Error(`consume pattern may not be a collection-decl or literal index: '${raw}'`);
@@ -116,8 +121,9 @@ export function matchConsume(
   if (pat.mode === 'map') {
     return el.suffix === pat.suffix ? { index: el.index } : null;
   }
-  // reduce: matches every member (suffix must be empty on both sides)
-  return el.suffix === '' ? { index: el.index } : null;
+  // reduce: matches every member whose suffix matches the pattern's suffix
+  // (bare reduce: both sides ""; suffixed reduce: matches the child lane).
+  return el.suffix === pat.suffix ? { index: el.index } : null;
 }
 
 /** Concrete path for a map produce given the bound element index. */

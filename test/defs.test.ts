@@ -321,6 +321,20 @@ test('validateDef flags a step that mixes a map and a reduce consume', () => {
   assert.ok(errors.some((e) => e.includes('mixes a map and a reduce')), errors.join('; '));
 });
 
+test('validateDef flags two differently-suffixed reduces on the same stem as more than one reduce consume', () => {
+  const errors = validateDef(buildDef({
+    name: 'bad',
+    inputs: [{ name: 'q' }],
+    steps: [
+      { name: 'g', consumes: ['q'], produces: ['a[]'] },
+      { name: 'x', consumes: ['a[$i]'], produces: ['a[$i].a'] },
+      { name: 'y', consumes: ['a[$i]'], produces: ['a[$i].b'] },
+      { name: 'multi', consumes: ['a[*].a', 'a[*].b'], produces: ['draft'] },
+    ],
+  }));
+  assert.ok(errors.some((e) => e.includes('more than one reduce consume')), errors.join('; '));
+});
+
 test('validateDef flags a per-element produce with no map consume to bind it', () => {
   const errors = validateDef(buildDef({
     name: 'bad',
@@ -613,6 +627,52 @@ test('lintDef warns about a non-terminal step whose output nothing consumes', ()
   assert.deepEqual(errors, []);
   assert.ok(warnings.some((w) => w.includes("step 'a' produces 'orphan' but nothing consumes it")), warnings.join('; '));
   assert.equal(warnings.filter((w) => w.includes('orphan')).length, 1, 'exactly one warning for orphan');
+});
+
+test('lintDef warns about a suffixed reduce whose child is not produced by any map', () => {
+  const def = buildDef({
+    name: 'danglingreduce',
+    inputs: [{ name: 'seed' }],
+    steps: [
+      { name: 'gather', consumes: ['seed'], produces: ['src[]'] },
+      { name: 'synth', consumes: ['src[*].child'], produces: ['draft'], terminal: true },
+    ],
+  });
+  const { errors, warnings } = lintDef(def);
+  assert.deepEqual(errors, []);
+  assert.ok(
+    warnings.some((w) => w.includes("step 'synth' consumes 'src[*].child' but no map step produces 'src[$i].child'")),
+    warnings.join('; '),
+  );
+});
+
+test('lintDef does not warn about a suffixed reduce whose child IS produced by a map', () => {
+  const def = buildDef({
+    name: 'wiredreduce',
+    inputs: [{ name: 'seed' }],
+    steps: [
+      { name: 'gather', consumes: ['seed'], produces: ['src[]'] },
+      { name: 'check', consumes: ['src[$i]'], produces: ['src[$i].child'] },
+      { name: 'synth', consumes: ['src[*].child'], produces: ['draft'], terminal: true },
+    ],
+  });
+  const { errors, warnings } = lintDef(def);
+  assert.deepEqual(errors, []);
+  assert.equal(warnings.filter((w) => w.includes('dangling suffixed-reduce')).length, 0, warnings.join('; '));
+});
+
+test('lintDef does not warn about a bare (unsuffixed) reduce', () => {
+  const def = buildDef({
+    name: 'barereduce',
+    inputs: [{ name: 'seed' }],
+    steps: [
+      { name: 'gather', consumes: ['seed'], produces: ['src[]'] },
+      { name: 'synth', consumes: ['src[*]'], produces: ['draft'], terminal: true },
+    ],
+  });
+  const { errors, warnings } = lintDef(def);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(warnings, []);
 });
 
 test('lintDef does not warn about unconsumed outputs on a terminal step', () => {
@@ -1854,6 +1914,43 @@ test('§27 (13) engine: is scoped per-file — an included/called child with a d
     // at buildDef time (per-file), before expandIncludes ever runs — expansion does not
     // re-check or propagate `engine:` at all (WorkflowDef.engine is not touched by prefixStep).
     assert.equal(all.get('parent')!.engine, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Mode 1 include: prefixStep keeps a reduce consume suffix after stem-prefixing', () => {
+  const dir = mktempDefsDir();
+  try {
+    writeFileSync(
+      join(dir, 'child.yaml'),
+      [
+        'name: child',
+        'inputs:',
+        '  - name: seed',
+        'steps:',
+        '  - name: gather',
+        '    consumes: [seed]',
+        '    produces: ["src[]"]',
+        '  - name: check',
+        '    consumes: ["src[$i]"]',
+        '    produces: ["src[$i].child"]',
+        '  - name: synth',
+        '    consumes: ["src[*].child"]',
+        '    produces: [draft]',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'parent.yaml'),
+      ['name: parent', 'steps:', '  - include: child', '    as: kid'].join('\n'),
+    );
+    const all = loadDefs(dir);
+    const parent = all.get('parent')!;
+    const synth = parent.steps.find((s) => s.name === 'kid.synth')!;
+    const rc = synth.consumes.find((c) => c.mode === 'reduce')!;
+    assert.equal(rc.stem, 'kid.src');
+    assert.equal(rc.suffix, '.child');
+    assert.equal(rc.raw, 'kid.src[*].child');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

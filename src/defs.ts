@@ -607,7 +607,7 @@ function prefixStep(step: StepDef, prefix: string): StepDef {
       raw = `${stem}[$${c.binder}]${c.suffix}`;
     } else {
       // reduce
-      raw = `${stem}[*]`;
+      raw = `${stem}[*]${c.suffix}`;
     }
     return { ...c, stem, raw };
   });
@@ -1368,17 +1368,56 @@ function deadEndWarnings(def: WorkflowDef): string[] {
 }
 
 /**
+ * Returns warning strings for a suffixed reduce (`src[*].child`) whose
+ * `.child` pattern is not actually produced by any map step over the same
+ * stem `src` — i.e. no step has a `produces:` map pattern with `stem ===
+ * src` and `suffix === '.child'`. The stem-level "consumed collection must
+ * have a producer" check (validateDef) already covers the bare-stem case;
+ * this is the narrower, suffix-specific dangling-wiring case, non-fatal
+ * because the wiring might be intentionally satisfied by a differently
+ * shaped producer.
+ */
+function danglingReduceSuffixWarnings(def: WorkflowDef): string[] {
+  const mapProduceSuffixesByStem = new Map<string, Set<string>>();
+  for (const l of def.steps) {
+    for (const p of l.produces) {
+      if (p.kind !== 'map') continue;
+      if (!mapProduceSuffixesByStem.has(p.stem)) mapProduceSuffixesByStem.set(p.stem, new Set());
+      mapProduceSuffixesByStem.get(p.stem)!.add(p.suffix);
+    }
+  }
+
+  const warnings: string[] = [];
+  for (const l of def.steps) {
+    for (const c of l.consumes) {
+      if (c.mode !== 'reduce' || c.suffix === '') continue;
+      const suffixes = mapProduceSuffixesByStem.get(c.stem);
+      if (!suffixes || !suffixes.has(c.suffix)) {
+        warnings.push(
+          `step '${l.name}' consumes '${c.raw}' but no map step produces ` +
+          `'${c.stem}[$i]${c.suffix}' (dangling suffixed-reduce wiring)`,
+        );
+      }
+    }
+  }
+  return warnings;
+}
+
+/**
  * Static lint over a workflow definition. Returns both the hard errors from
  * `validateDef` (which `parseDef` / `loadDefFile` would throw on) and
- * non-fatal warnings (dead-end outputs). Warnings never block loading — this
- * function is the right surface for author tooling / CI checks.
+ * non-fatal warnings (dead-end outputs, dangling suffixed-reduce wiring).
+ * Warnings never block loading — this function is the right surface for
+ * author tooling / CI checks.
  *
- * Dead-end warnings are suppressed when there are hard errors: a broken graph
+ * These warnings are suppressed when there are hard errors: a broken graph
  * may have spurious orphan stems that will resolve once the errors are fixed.
  */
 export function lintDef(def: WorkflowDef): { errors: string[]; warnings: string[] } {
   const errors = validateDef(def);
-  const warnings = errors.length === 0 ? deadEndWarnings(def) : [];
+  const warnings = errors.length === 0
+    ? [...deadEndWarnings(def), ...danglingReduceSuffixWarnings(def)]
+    : [];
   return { errors, warnings };
 }
 

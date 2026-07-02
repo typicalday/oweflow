@@ -94,8 +94,9 @@ Three things make this more than running steps in dependency order:
   resets the counter (optionally with new guidance).
 
 That's the core. Collections add fan-out/fan-in (a step emits N items, a `map` runs
-once per item, a `reduce` runs once they're all in) — see
-[`research`](examples/workflows/research.yaml).
+once per item, a `reduce` runs once they're all in, and a suffixed reduce
+(`src[*].child`) can fan in on a map's per-element output instead of the bare
+elements) — see [`research`](examples/workflows/research.yaml).
 
 ### What owenloop is not
 
@@ -656,6 +657,7 @@ relative `idleAfter` window and survives a process restart.
 | `gather.source[$i]` | **map** | one run per element; binds `${INDEX}` |
 | `gather.source[$i].verdict` | **map** produce | the per-element output of a map step |
 | `gather.source[*]` | **reduce** consume | once, when sealed and all surviving members green |
+| `gather.source[*].verdict` | **reduce** consume (suffixed) | once, when sealed and every surviving member's `.verdict` is green |
 
 A step consumes in exactly one mode — plain, a single map, or a single reduce. The
 validator enforces this at load time, so you don't hit it as a runtime surprise.

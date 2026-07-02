@@ -411,6 +411,28 @@ test('modelCheck: deadlocking def (maxAttempts=1 → stall after one reject)', (
   assert.equal(report.bounded, false, 'small def should be exhausted');
 });
 
+test('modelCheck: suffixed reduce (src[*].child) explores to completable', () => {
+  // gather emits members, formatcheck maps each into a `.formatcheck` child,
+  // synth fans in over the children (not the bare members). Confirms the
+  // checker — which reuses eligibleFirings directly, no separate reduce
+  // logic — explores the suffixed-reduce shape to a completable state.
+  const reduceSuffix = def(
+    'reduce-suffix-check',
+    [input('question', { seedOwed: false })],
+    [
+      step({ name: 'gather', consumes: ['question'], produces: ['gather.source[]'] }),
+      step({
+        name: 'formatcheck',
+        consumes: ['gather.source[$i]'],
+        produces: ['gather.source[$i].formatcheck'],
+      }),
+      step({ name: 'synth', consumes: ['gather.source[*].formatcheck'], produces: ['draft'] }),
+    ],
+  );
+  const report = modelCheck(reduceSuffix, { maxStates: 200 });
+  assert.equal(report.completable, true, 'suffixed-reduce workflow should be completable');
+});
+
 test('modelCheck: dead step via maxDepth truncation', () => {
   // With maxDepth=1, merger never fires in the delivery def (depth 1 only
   // reaches plan being green, not all the way to verdict being green).

@@ -58,6 +58,25 @@ const chained = def(
   ],
 );
 
+// A suffixed reduce (§11): `gather` emits bare members; `formatcheck` maps each
+// member into a per-element `.formatcheck` verdict; `synth` fans in over those
+// verdicts (`gather.source[*].formatcheck`), not the bare members. Exercises
+// that reduce eligibility, requiredInputs, and the cascade all gate on the
+// child artifact when the reduce consume carries a suffix.
+const chainedReduce = def(
+  'chainedReduce',
+  [input('question')],
+  [
+    step({ name: 'gather', consumes: ['question'], produces: ['gather.source[]'] }),
+    step({
+      name: 'formatcheck',
+      consumes: ['gather.source[$i]'],
+      produces: ['gather.source[$i].formatcheck'],
+    }),
+    step({ name: 'synth', consumes: ['gather.source[*].formatcheck'], produces: ['draft'] }),
+  ],
+);
+
 test('stepMode classifies plain / map / reduce', () => {
   assert.equal(stepMode(delivery.steps[0]!), 'plain');
   assert.equal(stepMode(research.steps[1]!), 'map');
@@ -225,6 +244,57 @@ test('reduce eligibility — needs seal green AND every live member green', () =
   assert.deepEqual(f2[0]!.inputs.sort(), ['gather.source.sealed', 'gather.source[0]']); // [1] dropped
 });
 
+test('suffixed reduce eligibility — gates on the child artifact, not the bare member', () => {
+  const base = [
+    { path: 'question', producer: 'human', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green' as const, version: 1, sealOf: 'gather.source' },
+    { path: 'draft', producer: 'synth', acceptance: 'owed' as const },
+  ];
+
+  // bare members are green, but children are owed → NOT eligible (the bare
+  // member's greenness is irrelevant to a suffixed reduce).
+  let a = arts([
+    ...base,
+    { path: 'gather.source[0].formatcheck', producer: 'formatcheck', acceptance: 'owed' as const },
+    { path: 'gather.source[1].formatcheck', producer: 'formatcheck', acceptance: 'owed' as const },
+  ]);
+  assert.equal(eligibleFirings(chainedReduce, a).some((x) => x.step === 'synth'), false);
+
+  // all children green → fires; inputs list the child paths, not bare members.
+  a = arts([
+    ...base,
+    { path: 'gather.source[0].formatcheck', producer: 'formatcheck', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source[1].formatcheck', producer: 'formatcheck', acceptance: 'green' as const, version: 1 },
+  ]);
+  const f = eligibleFirings(chainedReduce, a).filter((x) => x.step === 'synth');
+  assert.equal(f.length, 1);
+  assert.deepEqual(
+    f[0]!.inputs.sort(),
+    ['gather.source.sealed', 'gather.source[0].formatcheck', 'gather.source[1].formatcheck'],
+  );
+
+  // a rejected child blocks, even though its bare member is green.
+  a = arts([
+    ...base,
+    { path: 'gather.source[0].formatcheck', producer: 'formatcheck', acceptance: 'green' as const, version: 1 },
+    { path: 'gather.source[1].formatcheck', producer: 'formatcheck', acceptance: 'rejected' as const, version: 1 },
+  ]);
+  assert.equal(eligibleFirings(chainedReduce, a).some((x) => x.step === 'synth'), false);
+
+  // retracting a member (and thus its child leaving the live set) drops out
+  // without blocking — mirrors bare-reduce retract behavior.
+  a = arts([
+    ...base,
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'retracted' as const, version: 1 },
+    { path: 'gather.source[0].formatcheck', producer: 'formatcheck', acceptance: 'green' as const, version: 1 },
+  ]);
+  const f2 = eligibleFirings(chainedReduce, a).filter((x) => x.step === 'synth');
+  assert.equal(f2.length, 1);
+  assert.deepEqual(f2[0]!.inputs.sort(), ['gather.source.sealed', 'gather.source[0].formatcheck']);
+});
+
 test('members are returned in index order', () => {
   const a = arts([
     { path: 'g.s[2]', producer: 'g', acceptance: 'green', version: 1 },
@@ -257,6 +327,22 @@ test('requiredInputs — singleton, map child, and reduce shapes', () => {
   );
   // a seeded input (producer is human, not a step) rests on nothing
   assert.deepEqual(requiredInputs(research, r, r.get('question')!), []);
+});
+
+test('requiredInputs — suffixed reduce output rests on child paths, not bare members', () => {
+  const r = arts([
+    { path: 'question', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source[0].formatcheck', producer: 'formatcheck', acceptance: 'green', version: 4 },
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'green', version: 1 },
+    { path: 'gather.source[1].formatcheck', producer: 'formatcheck', acceptance: 'green', version: 2 },
+    { path: 'gather.source.sealed', producer: 'gather', acceptance: 'green', version: 1, sealOf: 'gather.source' },
+    { path: 'draft', producer: 'synth', acceptance: 'green', version: 1 },
+  ]);
+  assert.deepEqual(
+    requiredInputs(chainedReduce, r, r.get('draft')!).sort(),
+    ['gather.source.sealed', 'gather.source[0].formatcheck', 'gather.source[1].formatcheck'],
+  );
 });
 
 test('fingerprint compute + match', () => {
@@ -308,6 +394,47 @@ test('cascade — retracted element tombstones its map child', () => {
   ]);
   const ops = maintainDecisions(research, a);
   assert.deepEqual(ops.map((o) => [o.kind, o.path]), [['retract', 'gather.source[3].formatcheck']]);
+});
+
+test('forward cascade — suffixed reduce output rests on child fingerprints; a rejected child knocks it back', () => {
+  // draft was built when both children were green at v1; child [1] has since
+  // been re-arm-rejected (v1 -> rejected), so draft's resting fingerprint no
+  // longer matches -> structural reject, per the ordinary §11.8 cascade with
+  // no suffixed-reduce-specific machinery.
+  const a = arts([
+    { path: 'question', producer: 'human', acceptance: 'green', version: 1 },
+    { path: 'gather.source[0]', producer: 'gather', acceptance: 'green', version: 1, fingerprint: { question: 1 } },
+    {
+      path: 'gather.source[0].formatcheck',
+      producer: 'formatcheck',
+      acceptance: 'green',
+      version: 1,
+      fingerprint: { 'gather.source[0]': 1 },
+    },
+    { path: 'gather.source[1]', producer: 'gather', acceptance: 'green', version: 1, fingerprint: { question: 1 } },
+    { path: 'gather.source[1].formatcheck', producer: 'formatcheck', acceptance: 'rejected', version: 1 },
+    {
+      path: 'gather.source.sealed',
+      producer: 'gather',
+      acceptance: 'green',
+      version: 1,
+      sealOf: 'gather.source',
+      fingerprint: { question: 1 },
+    },
+    {
+      path: 'draft',
+      producer: 'synth',
+      acceptance: 'green',
+      version: 1,
+      fingerprint: {
+        'gather.source[0].formatcheck': 1,
+        'gather.source[1].formatcheck': 1,
+        'gather.source.sealed': 1,
+      },
+    },
+  ]);
+  const ops = maintainDecisions(chainedReduce, a);
+  assert.deepEqual(ops.map((o) => [o.kind, o.path]), [['reject', 'draft']]);
 });
 
 test('cascade — skipped input propagates skip to a plain dependent', () => {
