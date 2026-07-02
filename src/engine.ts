@@ -31,6 +31,7 @@ import {
 import type { ArtifactMap, CascadeOp, Firing, TimeFacts, WorkflowStatus } from './model.ts';
 import { summarizeIssues, validateValue } from './schema.ts';
 import type { SchemaIssue } from './schema.ts';
+import { hashDef } from './defs.ts';
 import { localMidnightMs, nowMs, randId } from './util.ts';
 import type { Store } from './store.ts';
 import type {
@@ -103,6 +104,23 @@ export interface TickResult {
    * to decide when to next wake the instance.
    */
   dueAt?: number;
+}
+
+/**
+ * §28: `status()`'s return shape — the pure `WorkflowStatus` plus an
+ * engine-level enrichment that needs both the pinned snapshot (from the
+ * store row) and the currently-loaded live def (from the resolver), which is
+ * why it lives here rather than in the pure `model.ts`.
+ */
+export interface EngineWorkflowStatus extends WorkflowStatus {
+  /** §28: true when the def currently loaded for this workflow's name differs
+   *  (by content hash) from the snapshot this instance is pinned to. Present
+   *  (true/false) whenever the instance has a pinned snapshot; absent for a
+   *  legacy un-pinned instance (nothing to compare) or when the live def
+   *  can't currently be resolved at all (can't determine drift, not "no
+   *  drift"). Informational — the engine keeps operating from the pinned
+   *  snapshot regardless; clear the drift by running `owenloop adopt <wf>`. */
+  defDrift?: boolean;
 }
 
 export interface CommitResult {
@@ -225,7 +243,14 @@ export class Engine {
     const def = this.resolveDef(defName);
     const id = randId('wf');
     this.store.tx(() => {
-      const wfData: { def: string; title?: string; params?: Record<string, string> } = { def: defName };
+      // §28: pin this instance to the def it was created against — a snapshot
+      // of the fully-expanded compiled def plus its content hash. Every new
+      // instance is stamped; "no snapshot" is strictly a legacy-row
+      // compatibility case (see defFor), never a choice made here.
+      const wfData: {
+        def: string; title?: string; params?: Record<string, string>;
+        defSnapshot: WorkflowDef; defHash: string;
+      } = { def: defName, defSnapshot: def, defHash: hashDef(def) };
       if (opts.title !== undefined) wfData.title = opts.title;
       if (opts.params !== undefined) wfData.params = opts.params;
       this.store.insertWorkflow(id, wfData, opts.producedBy);
@@ -292,6 +317,36 @@ export class Engine {
     this.maintainCalls(workflow, def);
   }
 
+  /**
+   * §28: re-pin `workflow` to the CURRENTLY-LOADED def for its name — re-
+   * snapshot + re-hash, overwriting the stored pin — then settle() so any new
+   * debts introduced by the updated shape (e.g. a newly added required input,
+   * a renamed producer) materialize immediately as a deliberate act, not a
+   * surprise on the next unrelated verb call. This is the explicit opt-in to
+   * re-wire an in-flight instance onto new def content; contrast defFor's
+   * silent, unconditional pin-preservation.
+   */
+  adopt(workflow: string): { workflow: string; defHash: string; previousHash?: string } {
+    const wf = this.store.getWorkflow(workflow);
+    if (!wf) throw new Error(`no such workflow instance: ${workflow}`);
+    // Intentional and correct: adopt is precisely the one place that MUST
+    // read the live current def, bypassing the pin, because re-pinning IS
+    // the point. If wf.def no longer resolves, let resolveDef throw
+    // naturally — adopting onto a def that's gone is a genuine error, unlike
+    // status's drift check which tolerates it.
+    const freshDef = this.resolveDef(wf.def);
+    const newHash = hashDef(freshDef);
+    const previousHash = wf.defHash;
+    this.store.tx(() => {
+      this.store.repinWorkflowDef(workflow, freshDef, newHash);
+      this.settle(workflow, freshDef);
+    });
+    this.fireSettled(workflow);
+    return previousHash !== undefined
+      ? { workflow, defHash: newHash, previousHash }
+      : { workflow, defHash: newHash };
+  }
+
   // ---- Mode 2 calls: child-instance management --------------------------------
 
   /**
@@ -338,7 +393,9 @@ export class Engine {
         if (!existingChild) continue; // defensive: createInstance returned but getWorkflow failed
 
         // STEP 4 — Read child's declared outcome artifact.
-        const childDef = this.resolveDef(existingChild.def);
+        // §28: go through defFor so a pinned child instance is read per its own
+        // pinned snapshot, not whatever def currently loads under its name.
+        const childDef = this.defFor(existingChild.id);
         const childOutcomeStem = childDef.outputs![0]!; // validated by Phase-2 check
         let childArts = this.artMap(existingChild.id);
         let childOutcomeArt = childArts.get(childOutcomeStem);
@@ -423,7 +480,9 @@ export class Engine {
     if (this._inMaintainCalls.has(parentWf)) return;
     const parentWfRow = this.store.getWorkflow(parentWf);
     if (!parentWfRow) return;
-    const parentDef = this.resolveDef(parentWfRow.def);
+    // §28: go through defFor so a pinned parent instance is maintained per its
+    // own pinned snapshot, not whatever def currently loads under its name.
+    const parentDef = this.defFor(parentWf);
     this.maintainCalls(parentWf, parentDef);
     this.fireSettled(parentWf);
   }
@@ -1162,10 +1221,12 @@ export class Engine {
 
   // ---- observability ---------------------------------------------------------
 
-  status(workflow: string): WorkflowStatus {
+  status(workflow: string): EngineWorkflowStatus {
+    const wf = this.store.getWorkflow(workflow);
+    if (!wf) throw new Error(`no such workflow instance: ${workflow}`);
     const def = this.defFor(workflow);
     const arts = this.artMap(workflow);
-    const st = workflowStatus(def, arts);
+    const st: EngineWorkflowStatus = workflowStatus(def, arts);
     // Enrich each debt with its producer's crash-step signal (the run log; the
     // pure layer has no store). A map-step producer fires once per element, its
     // run keyed by the consumed element path (e.g. "gather.source[0]"); a
@@ -1181,6 +1242,24 @@ export class Engine {
       // NEW: surface per-step attempts (lease-churn count)
       const task = this.store.getTask(workflow, a.producer, key);
       if (task && task.attempts > 0) d.attempts = task.attempts;
+    }
+    // §28: informational drift flag — compare the currently-loaded live def
+    // for this instance's def NAME against the pinned snapshot's hash. Only
+    // meaningful when a pin exists; only computable when the live def still
+    // resolves (it may have been deleted/renamed since the instance was
+    // pinned — that must not make `status` throw for a pinned instance that
+    // no longer needs the live def to keep running).
+    if (wf.defSnapshot !== undefined) {
+      let live: WorkflowDef | undefined;
+      try {
+        live = this.resolveDef(wf.def);
+      } catch {
+        live = undefined;
+      }
+      if (live !== undefined) {
+        const pinnedHash = wf.defHash ?? hashDef(wf.defSnapshot);
+        st.defDrift = hashDef(live) !== pinnedHash;
+      }
     }
     return st;
   }
@@ -1548,6 +1627,11 @@ export class Engine {
   private defFor(workflow: string): WorkflowDef {
     const wf = this.store.getWorkflow(workflow);
     if (!wf) throw new Error(`no such workflow instance: ${workflow}`);
+    // §28: prefer the pinned snapshot taken at create time (or last `adopt`).
+    // Rows created before this feature shipped have no snapshot — fall back
+    // to today's name-resolution, unchanged. This is the compatibility path,
+    // not an error: an un-pinned instance behaves exactly as it always has.
+    if (wf.defSnapshot !== undefined) return wf.defSnapshot;
     return this.resolveDef(wf.def);
   }
 

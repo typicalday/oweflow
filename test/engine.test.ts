@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Engine } from '../src/engine.ts';
 import type { Order } from '../src/engine.ts';
+import { hashDef } from '../src/defs.ts';
 import { openStore } from '../src/store.ts';
 import type { Store } from '../src/store.ts';
 import type { StepDef, WorkflowDef } from '../src/types.ts';
@@ -1047,4 +1048,166 @@ test('createInstance with producedBy persists parent coordinates and is readable
   assert.deepEqual(found.producedBy, { parentWf, parentPath });
 
   store.close();
+});
+
+// ---- §28: instance-to-definition pinning ------------------------------------
+
+/** Like makeEngine, but the resolver map is mutable so a test can swap what a
+ *  def NAME resolves to after an instance has already been created — the
+ *  scenario this feature exists to guard against. */
+function makeMutableEngine(initial: WorkflowDef[]): {
+  engine: Engine;
+  store: Store;
+  setDef: (d: WorkflowDef) => void;
+  removeDef: (name: string) => void;
+} {
+  const store = openStore(':memory:');
+  const byName = new Map(initial.map((d) => [d.name, d]));
+  const engine = new Engine(store, (name) => {
+    const d = byName.get(name);
+    if (!d) throw new Error(`no def: ${name}`);
+    return d;
+  });
+  return {
+    engine,
+    store,
+    setDef: (d) => byName.set(d.name, d),
+    removeDef: (name) => byName.delete(name),
+  };
+}
+
+test('§28: createInstance stamps a defSnapshot/defHash matching the def used', () => {
+  const { engine, store } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+  const row = store.getWorkflow(wf);
+  assert.ok(row !== undefined);
+  assert.deepEqual(row.defSnapshot, delivery);
+  assert.equal(row.defHash, hashDef(delivery));
+});
+
+test('§28: defFor falls back to name-resolution for a legacy row with no snapshot', () => {
+  const { engine, store } = makeMutableEngine([delivery]);
+  const wf = 'wf_legacy_test';
+  store.insertWorkflow(wf, { def: 'delivery' }); // simulate a pre-feature row: no snapshot
+  assert.equal(store.getWorkflow(wf)?.defSnapshot, undefined, 'sanity: row really has no pin');
+  // A verb that goes through defFor must resolve via resolveDef (the delivery
+  // def registered under that name), not throw — even with zero artifacts
+  // seeded (this row bypassed createInstance's seeding on purpose).
+  const s = engine.status(wf);
+  assert.deepEqual(s.debts, [], 'no artifacts were ever seeded on this bypassed row');
+  assert.equal(s.defDrift, undefined, 'no pin to compare against on a legacy row');
+});
+
+test('§28: an instance stays pinned to its original def shape even after the live def changes', () => {
+  const { engine, setDef } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  // Swap the live def under the same name for a DIFFERENT shape: builder now
+  // requires an extra consumed input ('extra') that the pinned instance never
+  // seeded and shouldn't need.
+  const changed = def(
+    'delivery',
+    [input('proposal'), input('extra')],
+    [
+      step({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+      step({ name: 'builder', consumes: ['plan', 'extra'], produces: ['pr'] }),
+      step({ name: 'reviewer', consumes: ['pr'], produces: ['verdict'] }),
+      step({ name: 'merger', consumes: ['verdict'], produces: ['merge'] }),
+    ],
+  );
+  setDef(changed);
+
+  // Drive the pinned instance through planner -> builder exactly like the
+  // original happy-path test. If the pin didn't hold, builder would now be
+  // blocked waiting on the unseeded 'extra' input.
+  complete(engine, wf, fire(engine, wf, 'planner', 1000), { plan: 'v1' });
+  const builderOrder = fire(engine, wf, 'builder', 2000);
+  assert.deepEqual(
+    builderOrder.inputs.sort(),
+    ['plan'],
+    'pinned instance must still see builder as consuming only "plan", not "plan"+"extra"',
+  );
+});
+
+test('§28: status().defDrift is false when the live def matches the pin', () => {
+  const { engine } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+  assert.equal(engine.status(wf).defDrift, false);
+});
+
+test('§28: status().defDrift is true when the live def has changed since pinning', () => {
+  const { engine, setDef } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  const changed = def(
+    'delivery',
+    [input('proposal')],
+    [
+      step({ name: 'planner', consumes: ['proposal'], produces: ['plan'], body: 'a new prompt' }),
+      step({ name: 'builder', consumes: ['plan'], produces: ['pr'] }),
+      step({ name: 'reviewer', consumes: ['pr'], produces: ['verdict'] }),
+      step({ name: 'merger', consumes: ['verdict'], produces: ['merge'] }),
+    ],
+  );
+  setDef(changed);
+
+  assert.equal(engine.status(wf).defDrift, true);
+});
+
+test('§28: status() does not throw when the live def can no longer be resolved for a pinned instance', () => {
+  const { engine, removeDef } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+  removeDef('delivery'); // simulate the source YAML being deleted/renamed
+
+  const s = engine.status(wf);
+  assert.equal(s.done, false, 'status must still work off the pinned snapshot');
+  assert.equal(s.defDrift, undefined, "can't determine drift when the live def can't resolve at all");
+});
+
+test('§28: adopt re-pins to the current def, clears drift, and settles a newly-introduced debt', () => {
+  const { engine, setDef } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+
+  // A concrete difference: a brand-new step producing a brand-new stem.
+  // `pendingOwed`/`settle` materializes fresh STEP OUTPUTS as debts (unlike
+  // workflow `inputs`, which are only ever seeded once, at createInstance
+  // time) — so this is the shape of def change that actually gives adopt's
+  // settle() call something new to surface.
+  const changed = def(
+    'delivery',
+    [input('proposal')],
+    [
+      step({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+      step({ name: 'builder', consumes: ['plan'], produces: ['pr'] }),
+      step({ name: 'reviewer', consumes: ['pr'], produces: ['verdict'] }),
+      step({ name: 'merger', consumes: ['verdict'], produces: ['merge'] }),
+      step({ name: 'notifier', consumes: ['verdict'], produces: ['notice'] }),
+    ],
+  );
+  setDef(changed);
+  assert.equal(engine.status(wf).defDrift, true);
+
+  const res = engine.adopt(wf);
+  assert.equal(res.workflow, wf);
+  assert.equal(res.defHash, hashDef(changed));
+  assert.equal(res.previousHash, hashDef(delivery));
+
+  const s = engine.status(wf);
+  assert.equal(s.defDrift, false, 'drift must be cleared once re-pinned to the live def');
+  assert.ok(
+    s.debts.some((d) => d.path === 'notice'),
+    'adopt must settle() so the new def shape\'s fresh debt (notice, from the new notifier step) materializes immediately',
+  );
+});
+
+test('§28: adopt on an unknown workflow id throws', () => {
+  const { engine } = makeMutableEngine([delivery]);
+  assert.throws(() => engine.adopt('wf_does_not_exist'), /no such workflow instance/);
+});
+
+test('§28: adopt throws when the live def no longer resolves at all (unlike status, which tolerates it)', () => {
+  const { engine, removeDef } = makeMutableEngine([delivery]);
+  const wf = engine.createInstance('delivery');
+  removeDef('delivery');
+  assert.throws(() => engine.adopt(wf), /no def: delivery/);
 });

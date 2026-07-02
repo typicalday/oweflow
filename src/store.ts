@@ -23,6 +23,7 @@ import type {
   RunData,
   TaskData,
   WorkflowData,
+  WorkflowDef,
 } from './types.ts';
 
 // ---- row-shaped records (data + identity + timestamps) ----------------------
@@ -137,8 +138,11 @@ CREATE TABLE IF NOT EXISTS meta (
  * numerically greater than this binary's, rather than silently stamping it
  * back down and running with a stale, incomplete understanding of a newer
  * on-disk schema.
+ *
+ * Bumped to '6' for instance-to-definition pinning (§28): the `workflow`
+ * table gains `def_snapshot`/`def_hash` columns (see `migrate()`).
  */
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 
 /** Thrown by the `Store` constructor when the on-disk `schema_version` is
  *  newer than this binary's `SCHEMA_VERSION` — the operator needs to
@@ -288,6 +292,8 @@ interface WorkflowRowRaw {
   params: string;
   produced_by_wf: string | null;
   produced_by_path: string | null;
+  def_snapshot: string | null;
+  def_hash: string | null;
   created_at: number;
 }
 
@@ -302,6 +308,13 @@ function mapWorkflow(r: WorkflowRowRaw): WorkflowRow {
   if (r.produced_by_wf !== null && r.produced_by_path !== null) {
     out.producedBy = { parentWf: r.produced_by_wf, parentPath: r.produced_by_path };
   }
+  const defSnapshot = fromJson<WorkflowDef | undefined>(r.def_snapshot, undefined, {
+    table: 'workflow',
+    id: r.id,
+    column: 'def_snapshot',
+  });
+  if (defSnapshot !== undefined) out.defSnapshot = defSnapshot;
+  if (r.def_hash !== null) out.defHash = r.def_hash;
   return out;
 }
 
@@ -406,6 +419,15 @@ export class Store {
     if (!artifactCols.some((c) => c.name === 'approvals')) {
       this.db.exec(`ALTER TABLE artifact ADD COLUMN approvals TEXT`);
     }
+    // Instance-to-definition pinning (§28): snapshot the compiled def + a
+    // content hash at create time so a running instance is not silently
+    // rewired when the source YAML changes underneath it.
+    if (!wfCols.some((c) => c.name === 'def_snapshot')) {
+      this.db.exec(`ALTER TABLE workflow ADD COLUMN def_snapshot TEXT`);
+    }
+    if (!wfCols.some((c) => c.name === 'def_hash')) {
+      this.db.exec(`ALTER TABLE workflow ADD COLUMN def_hash TEXT`);
+    }
   }
 
   /**
@@ -446,7 +468,11 @@ export class Store {
   insertWorkflow(id: string, data: WorkflowData, producedBy?: { parentWf: string; parentPath: string }): WorkflowRow {
     const at = nowMs();
     this.db
-      .prepare('INSERT INTO workflow (id, def, title, params, produced_by_wf, produced_by_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .prepare(
+        `INSERT INTO workflow
+           (id, def, title, params, produced_by_wf, produced_by_path, def_snapshot, def_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(
         id,
         data.def,
@@ -454,9 +480,22 @@ export class Store {
         JSON.stringify(data.params ?? {}),
         producedBy?.parentWf ?? null,
         producedBy?.parentPath ?? null,
+        toJson(data.defSnapshot),
+        data.defHash ?? null,
         at,
       );
     return this.getWorkflow(id) as WorkflowRow;
+  }
+
+  /**
+   * §28: re-pin `id` to a freshly-resolved def — overwrite its stored
+   * snapshot/hash. Pure data access: the store does not compute hashes or
+   * decide what "drift" means, it just persists what the engine computed.
+   */
+  repinWorkflowDef(id: string, snapshot: WorkflowDef, hash: string): void {
+    this.db
+      .prepare('UPDATE workflow SET def_snapshot = ?, def_hash = ? WHERE id = ?')
+      .run(JSON.stringify(snapshot), hash, id);
   }
 
   getWorkflow(id: string): WorkflowRow | undefined {

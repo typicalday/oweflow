@@ -187,6 +187,7 @@ Commands:
                                          bounded reachability check (deadlocks, stuck, dead steps, declared invariants)
   create <def> [--title t] [--provide name=json ...] [--param k=v ...]
   provide <wf> <name> [--value json]     supply an owed (seedOwed) input
+  adopt <wf>                             re-pin an instance to the current def (§28); settles new debts
   tick <wf> [--now <ms>]                 pull eligible orders
   status <wf>                            derive debts / eligible / blocked
   status --all                           every instance's status in one call (fleet read)
@@ -373,6 +374,12 @@ function dispatch(command: string, io: CliIO, args: Args): number {
         const name = need(args, 2, 'name');
         engine.provideInput(wf, name, parseJson(last(args, 'value')));
         print(io, { ok: true, provided: name });
+        return 0;
+      }
+      case 'adopt': {
+        const wf = need(args, 1, 'workflow');
+        const res = engine.adopt(wf);
+        print(io, { ok: true, ...res });
         return 0;
       }
       case 'tick': {
