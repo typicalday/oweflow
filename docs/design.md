@@ -576,9 +576,12 @@ this version yet.
 N `judges:` entries on one `produces` entry → N full synthesized `StepDef`s,
 named `${producerStep}.${producedStem}.judges.${judgeName}`. Each judge step:
 
-- `consumes: [judgedStem]` (+ the producer's own `consumes` if `inputs: true`)
-  — this is also how a judge gets `assertAuthority` for free: authority
-  already flows through consume-edges, no new grant needed.
+- `consumes: [judgedStem]` (+ the producer's own `consumes` if `inputs: true`,
+  spliced in as read-only context). `assertAuthority` (engine.ts) scopes a
+  judge's reject authority to exactly its own `judges:` stem, never to the
+  full `consumes` list — a judge with `inputs: true` can see the producer's
+  input stems for context but cannot invalidate them; only a non-judge
+  step's authority follows the plain consume-edge rule.
 - `produces: []` — a judge renders its verdict as a `green`/`reject` call
   against the judged stem, not by producing an artifact of its own.
 - `judges: <judgedStem>` — the marker field that makes it a judge (mirrors
