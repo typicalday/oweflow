@@ -941,13 +941,13 @@ says nothing about a child's, and vice versa.
 ### §27.2 Unknown-key rejection
 
 Every `Raw*` shape parsed from YAML (`RawDef`, `RawInput`, `RawStep`,
-`RawCalls`, `RawInclude`, `RawProduce`, `RawJudge`) is a *duck-typed*
-TypeScript interface — it describes what the parser reads, but on its own
-does nothing to stop an author's typo (`bodyfile:` instead of `bodyFile:`,
-`maxAttepts:` instead of `maxAttempts:`) or a stray/forward-looking field
-from being silently accepted and then silently ignored. Before this change,
-such a field parsed cleanly and simply never took effect — a debugging trap
-with no error message pointing at the cause.
+`RawCalls`, `RawInclude`, `RawProduce`, `RawGroup`, `RawJudge`) is a
+*duck-typed* TypeScript interface — it describes what the parser reads, but
+on its own does nothing to stop an author's typo (`bodyfile:` instead of
+`bodyFile:`, `maxAttepts:` instead of `maxAttempts:`) or a stray/forward-looking
+field from being silently accepted and then silently ignored. Before this
+change, such a field parsed cleanly and simply never took effect — a
+debugging trap with no error message pointing at the cause.
 
 `assertNoUnknownKeys(obj, allowed, ctx)` closes that gap: called immediately
 after each duck-type cast (`as RawX`) and before any field on that object is
@@ -957,22 +957,31 @@ beside `RawStep`). A mismatch between the interface and its allowlist is a
 correctness bug, not a type error — the two are kept adjacent in defs.ts
 specifically so a reviewer adding a field to one sees the other.
 
-It is wired into all seven parse sites: the top-level definition
+It is wired into all eight parse sites: the top-level definition
 (`RAW_DEF_KEYS`), a normal step (`RAW_STEP_KEYS`), a produce mapping entry
-(`RAW_PRODUCE_KEYS`), a judge entry (`RAW_JUDGE_KEYS`), an input entry
+(`RAW_PRODUCE_KEYS`), a `group:` exclusivity entry in a `produces:` list
+(`RAW_GROUP_KEYS`, §26), a judge entry (`RAW_JUDGE_KEYS`), an input entry
 (`RAW_INPUT_KEYS`), and the two duck-typed step-list directives that are
 distinguished from a normal step and from each other purely by which
 discriminator key is present: a `calls:` step (`RAW_CALLS_KEYS`) and an
 `include:` directive (`RAW_INCLUDE_KEYS`).
 
-That last pair is the one subtlety worth calling out explicitly: `calls:`
-and `include:` steps are *smaller, different* shapes from a normal step, not
-a normal step with extra fields. A `calls:` step entry that also carries
-`body:` is not "a calls step with an unused body field" — it's rejected as
-an unknown key, because `RAW_CALLS_KEYS` (`name`, `calls`, `inputs`,
-`produces`) does not include `body`. The routing itself (which allowlist an
-entry is checked against) is decided by `isIncludeDirective` /
-`isCallsDirective` / the `rl.calls !== undefined` check in `buildStep` —
-exactly the same discriminator logic already used to dispatch parsing —
-so the unknown-key check can never accidentally validate an entry against
-the wrong shape's allowlist.
+The `group:` site follows the same "smaller, different shape" rule as the
+`calls:`/`include:` pair below, for the same reason: a `group:` entry
+(`group`, `mode`, `of`) is not a produce entry with extra fields, it's a
+distinct, smaller shape routed by `parseProduces` checking `'group' in
+entry` before falling through to `RAW_PRODUCE_KEYS` — so it gets its own
+allowlist rather than folding into one that would wrongly permit `name:` or
+`schema:` on a group declaration.
+
+That last pair (`calls:`/`include:`) is the other subtlety worth calling
+out explicitly: `calls:` and `include:` steps are *smaller, different*
+shapes from a normal step, not a normal step with extra fields. A `calls:`
+step entry that also carries `body:` is not "a calls step with an unused
+body field" — it's rejected as an unknown key, because `RAW_CALLS_KEYS`
+(`name`, `calls`, `inputs`, `produces`) does not include `body`. The
+routing itself (which allowlist an entry is checked against) is decided by
+`isIncludeDirective` / `isCallsDirective` / the `rl.calls !== undefined`
+check in `buildStep` — exactly the same discriminator logic already used to
+dispatch parsing — so the unknown-key check can never accidentally validate
+an entry against the wrong shape's allowlist.
