@@ -457,8 +457,10 @@ produces:
 
 A group's auto-skip re-arms exactly like a manual skip (same fingerprint
 mechanism, §7) if the upstream inputs it depended on move. See
-[`docs/design.md` §26](docs/design.md) for the full design (refusal timing,
-the judges interaction, and the model-checker parity guarantee).
+[`routing-groups.yaml`](examples/workflows/routing-groups.yaml) for a
+runnable example, and [`docs/design.md` §26](docs/design.md) for the full
+design (refusal timing, the judges interaction, and the model-checker parity
+guarantee).
 
 ### `outputs:` — the workflow's interface
 

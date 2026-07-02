@@ -898,3 +898,7 @@ explores the real refusal path rather than an impossible green — the same
 differential-conformance test (`test/check.test.ts`'s pattern) that pins
 every other outcome family to the live `Engine` covers this one too
 (`test/groups.test.ts`, scenario (h)).
+
+See `examples/workflows/routing-groups.yaml` for a runnable end-to-end
+example (the same router shape as `routing.yaml`, with the manual
+`engine.skip()` replaced by a declarative `group:`/`exactlyOne` contract).
