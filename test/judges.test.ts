@@ -286,6 +286,65 @@ test('judges: (e2) a stale judge verdict against an artifact another judge alrea
   assert.equal(getArt(store, wf, 'report')?.judgmentRejects, 1);
 });
 
+// ---- (e3) §4.6 stale-verdict race: a stale judge REJECT (not approve) ---------
+
+test('judges: (e3) a stale judge reject against a resubmitted version is born-rejected, not corrupting v2', () => {
+  const { engine, store } = makeEngine([researcherDef()]);
+  const wf = engine.createInstance('researcherDef', { provide: { question: { text: 'why' } } });
+
+  const run1 = engine.tick(wf).orders[0]!.run;
+  engine.green(wf, run1, 'report', { sections: ['a'] });
+  engine.close(wf, run1);
+
+  // Claim the completeness judge order against v1 (fingerprints v1).
+  const tick2 = engine.tick(wf);
+  const completenessOrder = tick2.orders.find((o) => o.step.endsWith('.completeness'))!;
+  const rigorOrder = tick2.orders.find((o) => o.step.endsWith('.rigor'))!;
+
+  // A sibling judge (rigor) rejects v1 first — report leaves `submitted`, one strike.
+  engine.reject(wf, 'report', rigorOrder.step, 'not rigorous');
+  engine.close(wf, rigorOrder.run);
+  assert.equal(getArt(store, wf, 'report')?.acceptance, 'rejected');
+  assert.equal(getArt(store, wf, 'report')?.judgmentRejects, 1);
+
+  // Producer rebuilds and resubmits — a fresh v2, ledger cleared.
+  const researchOrder2 = engine.tick(wf).orders.find((o) => o.step === 'researcher')!;
+  engine.green(wf, researchOrder2.run, 'report', { sections: ['a', 'b'] });
+  engine.close(wf, researchOrder2.run);
+  const v2 = getArt(store, wf, 'report');
+  assert.equal(v2?.acceptance, 'submitted');
+  assert.equal(v2?.version, 2);
+
+  // A second judge round claims fresh orders against v2 — get a partial approval
+  // recorded on v2's ledger before the stale v1 verdict arrives.
+  const tick3 = engine.tick(wf);
+  const rigorOrder2 = tick3.orders.find((o) => o.step.endsWith('.rigor'))!;
+  engine.green(wf, rigorOrder2.run, 'report', {});
+  engine.close(wf, rigorOrder2.run);
+  assert.deepEqual(getArt(store, wf, 'report')?.approvals, { rigor: 2 });
+
+  // The completeness judge's stale v1 order — still holding its lease from before
+  // the rebuild — finally renders its (late) reject verdict. Must be refused
+  // (born-rejected), not applied to the unrelated newer v2 submission.
+  const staleRejectRes = engine.reject(wf, 'report', completenessOrder.step, 'stale: missing citations (v1)');
+  assert.equal(staleRejectRes.outcome, 'born-rejected');
+
+  // v2 is untouched by the stale reject: still submitted at v2, one strike total
+  // (not double-bumped), and the in-progress approval ledger survives intact.
+  const art = getArt(store, wf, 'report');
+  assert.equal(art?.acceptance, 'submitted', 'v2 must not be re-rejected by the stale v1 verdict');
+  assert.equal(art?.version, 2);
+  assert.equal(art?.judgmentRejects, 1, 'the stale reject must not double-bump judgmentRejects');
+  assert.deepEqual(art?.approvals, { rigor: 2 }, 'v2\'s in-progress approval ledger must survive intact');
+
+  // The stale judge order's lease was released (not left dangling): a fresh
+  // completeness order should be claimable on the next tick.
+  const tick4 = engine.tick(wf);
+  const refiredCompleteness = tick4.orders.find((o) => o.step === completenessOrder.step);
+  assert.ok(refiredCompleteness !== undefined, 'the stale judge order releases its lease and can re-fire');
+  assert.notEqual(refiredCompleteness!.run, completenessOrder.run);
+});
+
 // ---- (f) dead judge order reaped, re-fired, no judgmentRejects bump ----------
 
 test('judges: (f) a dead judge order is reaped and re-fired without a judgmentRejects strike', () => {

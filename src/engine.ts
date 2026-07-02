@@ -900,13 +900,56 @@ export class Engine {
 
   // ---- consumer invalidation -------------------------------------------------
 
-  /** Judgment reject (§4): a consumer says "fix it". Re-arms the producer. */
-  reject(workflow: string, path: string, by: Author, text: string): void {
+  /**
+   * Judgment reject (§4): a consumer says "fix it". Re-arms the producer.
+   *
+   * §24 §4.6: when `by` names a judge step, this is a judge *verdict*, not an
+   * ordinary consumer invalidation — it must pass through the same
+   * `judgeCasCheck` staleness guard as a judge's `green()` approve (§24.4).
+   * Without it, a judge order that outlives a sibling judge's reject, a
+   * human bypass, or a producer resubmit could land its stale reject on an
+   * unrelated newer submission: double-bumping `judgmentRejects` and wiping
+   * that newer submission's in-progress approval ledger. `reject()` has no
+   * `run` parameter (unlike `green`) — it is step-scoped, not run-scoped, by
+   * design (§4.1: authority follows the consume edge, keyed by actor name) —
+   * so the fingerprint to CAS against is looked up via the task table's
+   * *currently claimed* run for the judge step (`by`), the same lease record
+   * `openRun` consults. This catches every case in §4.6 (producer resubmit, a
+   * sibling judge's reject, a human bypass) because each moves the judged
+   * stem off `submitted`. It does not (and structurally cannot, without a
+   * `run` id on this verb) distinguish two *different* runs of the *same*
+   * judge step racing on the *same* still-submitted version — e.g. a reaped
+   * order's late reject arriving after its own task was re-claimed by a
+   * fresh run. That narrower race predates this fix and is out of scope here.
+   */
+  reject(workflow: string, path: string, by: Author, text: string): { outcome: 'rejected' | 'born-rejected'; reason?: string } {
     const def = this.defFor(workflow);
     this.assertAuthority(def, by, path, 'reject');
-    this.store.tx(() => {
+    const judgeStep = def.steps.find((s) => s.name === by);
+    const judgedStem = judgeStep?.judges;
+    let releasedRun: string | undefined;
+
+    const result = this.store.tx((): { outcome: 'rejected' | 'born-rejected'; reason?: string } => {
       const art = this.store.getArtifact(workflow, path);
       if (!art) throw new Error(`cannot reject unknown artifact: ${path}`);
+
+      if (judgedStem !== undefined) {
+        // A judge's reject targets the judged stem, mirroring green()'s
+        // judge-approve branch (§24.4): CAS-guard against a stale verdict
+        // before applying it.
+        const task = this.store.getTask(workflow, by, '');
+        const run = task?.run ? this.store.getRun(task.run) : undefined;
+        const cas = this.judgeCasCheck(art, judgedStem, run?.fingerprint ?? {});
+        if (cas.moved) {
+          if (task?.run) {
+            this.releaseLeaseOnBornReject(workflow, task.run);
+            releasedRun = task.run;
+          }
+          this.settle(workflow, def);
+          return { outcome: 'born-rejected', reason: cas.reason };
+        }
+      }
+
       // §24 §3.1/§4.4: a judge reject (or a human reject on a `submitted`
       // artifact) is a quality verdict, not a cascade invalidation — it wins
       // immediately regardless of any other judge's already-recorded approval,
@@ -922,9 +965,20 @@ export class Engine {
         reasons: [...art.reasons, reason('reject', 'judgment', by, text, art.version)],
       });
       this.settle(workflow, def);
+      return { outcome: 'rejected' };
     });
-    this.fire({ type: 'commit', workflow, path, action: 'reject' });
+    this.fire({
+      type: 'commit',
+      workflow,
+      path,
+      action: 'reject',
+      ...(result.outcome === 'born-rejected' ? { outcome: 'born-rejected' as const } : {}),
+    });
+    if (result.outcome === 'born-rejected' && releasedRun !== undefined) {
+      this.fire({ type: 'closed', workflow, run: releasedRun, outcome: 'no_work' });
+    }
     this.fireSettled(workflow);
+    return result;
   }
 
   /** Retract a collection member (§11.3): drop it, terminally; abandon the index. */
