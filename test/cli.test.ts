@@ -98,6 +98,42 @@ test('a full delivery happy path runs end to end through main()', () => {
   assert.deepEqual(run('list').json(), []);
 });
 
+// ---- delete: refuses children unless --recursive ----------------------------
+
+test('delete refuses a workflow with children unless --recursive is passed', () => {
+  const { run } = makeCli();
+
+  // provisioned-delivery: provision -> deliver (calls: delivery) -> teardown
+  const parent = run(
+    'create',
+    'provisioned-delivery',
+    '--provide',
+    `proposal=${J({ text: 'x' })}`,
+  ).json().workflow;
+
+  const provOrder = run('tick', parent).json().orders.find((o: any) => o.step === 'provision');
+  assert.ok(provOrder, 'provision order');
+  run('green', parent, provOrder.run, 'sandbox', '--value', J({ env: 'test' }));
+  run('close', parent, provOrder.run);
+
+  // Tick again: maintainCalls spawns the child `delivery` instance.
+  run('tick', parent);
+  const children = run('list').json().filter((w: any) => w.id !== parent);
+  assert.equal(children.length, 1, 'child instance should be spawned via calls:');
+
+  const refused = run('delete', parent);
+  assert.equal(refused.code, 1);
+  assert.match(refused.err, /child instance/);
+  assert.match(refused.err, /--recursive/);
+  // parent must still exist after the refusal
+  assert.ok(run('list').json().some((w: any) => w.id === parent));
+
+  const ok = run('delete', parent, '--recursive');
+  assert.equal(ok.code, 0);
+  assert.equal(ok.json().deleted, parent);
+  assert.deepEqual(run('list').json(), [], 'parent and child both gone');
+});
+
 // ---- JSON validation on --value / --provide / --items -----------------------
 
 test('--value must be a JSON object, not an array / scalar / null', () => {

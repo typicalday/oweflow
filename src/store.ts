@@ -136,9 +136,14 @@ const SCHEMA_VERSION = '5';
 function toJson(v: unknown): string | null {
   return v === undefined ? null : JSON.stringify(v);
 }
-function fromJson<T>(s: unknown, fallback: T): T {
+function fromJson<T>(s: unknown, fallback: T, ctx: { table: string; id: string; column: string }): T {
   if (s === null || s === undefined) return fallback;
-  return JSON.parse(s as string) as T;
+  try {
+    return JSON.parse(s as string) as T;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Corrupt JSON in ${ctx.table}.${ctx.column} for row ${ctx.id}: ${msg}`);
+  }
 }
 
 interface ArtifactRowRaw {
@@ -167,18 +172,30 @@ function mapArtifact(r: ArtifactRowRaw): ArtifactRow {
     producer: r.producer,
     acceptance: r.acceptance as Acceptance,
     version: r.version,
-    reasons: fromJson<ReasonEntry[]>(r.reasons, []),
+    reasons: fromJson<ReasonEntry[]>(r.reasons, [], { table: 'artifact', id: r.id, column: 'reasons' }),
     judgmentRejects: r.judgment_rejects,
     schemaRejects: r.schema_rejects,
     terminal: r.terminal === 1,
     updatedAt: r.updated_at,
   };
-  const value = fromJson<Record<string, unknown> | undefined>(r.value, undefined);
+  const value = fromJson<Record<string, unknown> | undefined>(r.value, undefined, {
+    table: 'artifact',
+    id: r.id,
+    column: 'value',
+  });
   if (value !== undefined) out.value = value;
-  const fp = fromJson<Fingerprint | undefined>(r.fingerprint, undefined);
+  const fp = fromJson<Fingerprint | undefined>(r.fingerprint, undefined, {
+    table: 'artifact',
+    id: r.id,
+    column: 'fingerprint',
+  });
   if (fp !== undefined) out.fingerprint = fp;
   if (r.seal_of !== null) out.sealOf = r.seal_of;
-  const approvals = fromJson<Record<string, number> | undefined>(r.approvals, undefined);
+  const approvals = fromJson<Record<string, number> | undefined>(r.approvals, undefined, {
+    table: 'artifact',
+    id: r.id,
+    column: 'approvals',
+  });
   if (approvals !== undefined) out.approvals = approvals;
   return out;
 }
@@ -240,7 +257,11 @@ function mapRun(r: RunRowRaw): RunRow {
   if (r.outcome !== null) out.outcome = r.outcome as RunData['outcome'];
   if (r.summary !== null) out.summary = r.summary;
   if (r.session_id !== null) out.sessionId = r.session_id;
-  const fp = fromJson<Fingerprint | undefined>(r.fingerprint, undefined);
+  const fp = fromJson<Fingerprint | undefined>(r.fingerprint, undefined, {
+    table: 'run',
+    id: r.id,
+    column: 'fingerprint',
+  });
   if (fp !== undefined) out.fingerprint = fp;
   if (r.cause !== null) out.cause = r.cause as RunData['cause'];
   return out;
@@ -260,7 +281,7 @@ function mapWorkflow(r: WorkflowRowRaw): WorkflowRow {
   const out: WorkflowRow = {
     id: r.id,
     def: r.def,
-    params: fromJson<Record<string, string>>(r.params, {}),
+    params: fromJson<Record<string, string>>(r.params, {}, { table: 'workflow', id: r.id, column: 'params' }),
     createdAt: r.created_at,
   };
   if (r.title !== null) out.title = r.title;
@@ -428,11 +449,25 @@ export class Store {
     return rows.map(mapWorkflow);
   }
 
+  /** Deletes only this workflow's own rows (artifact/task/run/workflow). Does NOT
+   * cascade to children spawned via calls: — see deleteWorkflowCascade for that. */
   deleteWorkflow(id: string): void {
     this.db.prepare('DELETE FROM artifact WHERE workflow = ?').run(id);
     this.db.prepare('DELETE FROM task WHERE workflow = ?').run(id);
     this.db.prepare('DELETE FROM run WHERE workflow = ?').run(id);
     this.db.prepare('DELETE FROM workflow WHERE id = ?').run(id);
+  }
+
+  /**
+   * Recursively delete a workflow and all of its descendant instances (spawned
+   * via calls:, see listChildrenByParent). Deletes children's children first,
+   * then each child, then the workflow itself — full recursive cascade.
+   */
+  deleteWorkflowCascade(id: string): void {
+    for (const child of this.listChildrenByParent(id)) {
+      this.deleteWorkflowCascade(child.id);
+    }
+    this.deleteWorkflow(id);
   }
 
   /**

@@ -196,6 +196,47 @@ test('deleteWorkflow cascades to artifacts/tasks/runs', () => {
   s.close();
 });
 
+test('deleteWorkflowCascade removes parent + all descendants (grandchild included)', () => {
+  const s = mem();
+  const parent = randId('wf');
+  const child = randId('wf');
+  const grandchild = randId('wf');
+  s.insertWorkflow(parent, { def: 'd' });
+  s.insertWorkflow(child, { def: 'd' }, { parentWf: parent, parentPath: 'calls' });
+  s.insertWorkflow(grandchild, { def: 'd' }, { parentWf: child, parentPath: 'calls' });
+  for (const wf of [parent, child, grandchild]) {
+    s.putArtifact(artifact(wf, 'plan'));
+    s.putTask({ workflow: wf, step: 'build', key: '', status: 'idle', attempts: 0 });
+    s.insertRun(randId('run'), { workflow: wf, step: 'build' });
+  }
+  s.deleteWorkflowCascade(parent);
+  for (const wf of [parent, child, grandchild]) {
+    assert.equal(s.getWorkflow(wf), undefined, `${wf} workflow row gone`);
+    assert.equal(s.listArtifacts(wf).length, 0, `${wf} artifacts gone`);
+    assert.equal(s.listTasks(wf).length, 0, `${wf} tasks gone`);
+    assert.equal(s.countRuns(wf, 'build', 0), 0, `${wf} runs gone`);
+  }
+  s.close();
+});
+
+test('a corrupted JSON column raises an error naming the table and row id', () => {
+  const s = mem();
+  const wf = randId('wf');
+  s.putArtifact(artifact(wf, 'plan', { acceptance: 'green', version: 1, value: { ok: true } }));
+  const id = artifactId(wf, 'plan');
+  // corrupt the `value` column directly, bypassing the store's own JSON.stringify
+  s.db.prepare('UPDATE artifact SET value = ? WHERE id = ?').run('{not valid json', id);
+  assert.throws(
+    () => s.getArtifact(wf, 'plan'),
+    (err: Error) => {
+      assert.match(err.message, /artifact/);
+      assert.match(err.message, new RegExp(id));
+      return true;
+    },
+  );
+  s.close();
+});
+
 test('run cause round-trips through insert and update', () => {
   const s = mem();
   const wf = randId('wf');

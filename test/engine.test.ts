@@ -4,7 +4,7 @@ import { Engine } from '../src/engine.ts';
 import type { Order } from '../src/engine.ts';
 import { openStore } from '../src/store.ts';
 import type { Store } from '../src/store.ts';
-import type { WorkflowDef } from '../src/types.ts';
+import type { StepDef, WorkflowDef } from '../src/types.ts';
 import { def, input, step } from './helpers.ts';
 
 // ---- fixtures & harness ------------------------------------------------------
@@ -297,6 +297,67 @@ test('forward cascade: re-deciding plan structurally re-rejects the green pr', (
   const builder2 = fire(engine, wf, 'builder', 4000);
   // consumes maps each input path to its full value object
   assert.deepEqual(builder2.consumes, { plan: { plan: 'v2' } });
+});
+
+// ---- M2B: deepEqual must be order-insensitive on object keys ----------------
+
+// Minimal calls: fixture (mirrors test/calls.test.ts's childDef/parentDef/deliverStep
+// pattern) — deepEqual only guards the M2B-REPROVIDE / MACHINE-GREEN calls: cascade,
+// so exercising it requires a calls: step.
+const deepEqualChildDef: WorkflowDef = {
+  ...def(
+    'deepEqualChildDef',
+    [input('data', { seedOwed: true })],
+    [step({ name: 'worker', consumes: ['data'], produces: ['result'] })],
+  ),
+  outputs: ['result'],
+};
+
+const deepEqualDeliverStep: StepDef = {
+  ...step({ name: 'deliver', produces: ['delivered'] }),
+  calls: 'deepEqualChildDef',
+  callsInputs: { data: 'sandbox' },
+  consumes: [],
+};
+
+const deepEqualParentDef: WorkflowDef = def(
+  'deepEqualParentDef',
+  [input('proposal', { seedOwed: true })],
+  [
+    step({ name: 'provision', consumes: ['proposal'], produces: ['sandbox'] }),
+    deepEqualDeliverStep,
+  ],
+);
+
+test('deepEqual on calls: gate input is order-insensitive: key reorder alone must not re-provide', () => {
+  const { engine, store } = makeEngine([deepEqualChildDef, deepEqualParentDef]);
+  const parentWf = engine.createInstance('deepEqualParentDef', { provide: { proposal: { text: 'hello' } } });
+
+  // Green sandbox with keys in one order, tick → child spawned with that value.
+  const provOrder = fire(engine, parentWf, 'provision', 1000);
+  complete(engine, parentWf, provOrder, { a: 1, b: 2 });
+  engine.tick(parentWf, { now: 1000 });
+
+  const childRow = store.findChildByParent(parentWf, 'delivered');
+  assert.ok(childRow !== undefined, 'child should be spawned after sandbox is green');
+  const before = store.getArtifact(childRow!.id, 'data');
+  assert.deepEqual(before?.value, { a: 1, b: 2 });
+
+  // Re-provide the parent's proposal input, driving a new sandbox value with the SAME
+  // keys/values but in a different insertion order — semantically identical.
+  const sandboxArt = store.getArtifact(parentWf, 'sandbox');
+  assert.ok(sandboxArt !== undefined);
+  store.putArtifact({
+    ...sandboxArt!,
+    version: sandboxArt!.version + 1,
+    value: { b: 2, a: 1 },
+  });
+
+  // Tick parent → maintainCalls runs again; deepEqual must treat {a:1,b:2} and {b:2,a:1}
+  // as equal, so no re-provide (version must not bump).
+  engine.tick(parentWf, { now: 2000 });
+  const after = store.getArtifact(childRow!.id, 'data');
+  assert.equal(after?.version, before?.version, 'key-order-only change must not trigger re-provide');
 });
 
 // ---- collections: emit / seal / map / reduce --------------------------------
