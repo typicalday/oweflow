@@ -23,7 +23,7 @@
  *   owenloop skip    <wf> <path> --by <author> --text <msg>
  *   owenloop retry   <wf> <path> [--by <author>] [--text <guidance>]   clear a stall
  *   owenloop close <wf> <run> [--outcome ok|no_work|failed|skipped] [--summary s]
- *   owenloop delete <wf>
+ *   owenloop delete <wf> [--recursive]
  *
  * Global: --db <path> (env OWENLOOP_DB), --defs <dir> (env OWENLOOP_DEFS).
  */
@@ -203,7 +203,7 @@ Commands:
   retry <wf> <path> [--by <author>] [--text <guidance>]   clear a §6 stall
   heartbeat <wf> <run> [--now <ms>]    touch liveness timestamp on an open run
   close <wf> <run> [--outcome ok|no_work|failed|skipped] [--summary s]
-  delete <wf>
+  delete <wf> [--recursive]              refuse if children exist unless --recursive (cascades)
 
 Environment: OWENLOOP_DB, OWENLOOP_DEFS`;
 
@@ -573,8 +573,22 @@ function dispatch(command: string, io: CliIO, args: Args): number {
       }
       case 'delete': {
         const wf = need(args, 1, 'workflow');
-        store.deleteWorkflow(wf);
-        print(io, { ok: true, deleted: wf });
+        const children = store.listChildrenByParent(wf);
+        // Default is refuse-with-children, not silent cascade: an operator deleting one workflow
+        // should not accidentally destroy an unbounded tree of spawned instances. --recursive opts in.
+        if (children.length > 0 && !flag(args, 'recursive')) {
+          throw new CliError(
+            `workflow '${wf}' has ${children.length} child instance(s): ` +
+              `${children.map((c) => `${c.id} (${c.def})`).join(', ')}. ` +
+              `Refusing to delete without --recursive.`,
+          );
+        }
+        if (flag(args, 'recursive')) {
+          store.deleteWorkflowCascade(wf);
+        } else {
+          store.deleteWorkflow(wf);
+        }
+        print(io, { ok: true, deleted: wf, ...(children.length > 0 ? { cascaded: children.length } : {}) });
         return 0;
       }
       case 'graph': {

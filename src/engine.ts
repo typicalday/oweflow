@@ -387,7 +387,7 @@ export class Engine {
               ...artNow,
               acceptance: 'owed',
               reasons: [...artNow.reasons, {
-                at: Date.now(),
+                at: nowMs(),
                 action: 'reopen' as const,
                 kind: 'structural' as const,
                 by: 'engine' as const,
@@ -1588,7 +1588,19 @@ function substitute(body: string, vars: Record<string, string>): string {
   return body.replace(/\$\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] ?? '' : m));
 }
 
-/** M2B: deep-equal via JSON serialization (plain JSON objects only — no undefined/functions). */
+/** M2B: structural deep-equal, order-insensitive on object keys (artifact values are always JSON-shaped). */
 function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => deepEqual(v, b[i]));
+  }
+  const aObj = a as Record<string, unknown>;
+  const bObj = b as Record<string, unknown>;
+  const aKeys = Object.keys(aObj);
+  const bKeys = Object.keys(bObj);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => Object.prototype.hasOwnProperty.call(bObj, k) && deepEqual(aObj[k], bObj[k]));
 }
