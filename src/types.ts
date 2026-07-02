@@ -135,6 +135,14 @@ export interface WorkflowData {
   def: string; // definition name
   title?: string;
   params?: Record<string, string>;
+  /** Instance-to-definition pinning (§28): the compiled def this instance was
+   *  created against, snapshotted verbatim as JSON. Absent on rows created
+   *  before this feature shipped — those instances fall back to today's
+   *  name-resolution behavior (see Engine.defFor). */
+  defSnapshot?: WorkflowDef;
+  /** Content hash of `defSnapshot` at the time it was stamped (or last
+   *  re-pinned via `adopt`). Absent iff `defSnapshot` is absent. */
+  defHash?: string;
 }
 
 // ---- workflow definitions ----------------------------------------------------

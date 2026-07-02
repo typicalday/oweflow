@@ -20,6 +20,7 @@
  *         Draft a plan for ${WORKFLOW}.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -494,6 +495,18 @@ function parseInvariants(v: unknown, ctx: string): InvariantDef[] {
 }
 
 // ---- parse + build -----------------------------------------------------------
+
+/**
+ * Instance-to-definition pinning (§28): a stable content hash of a compiled
+ * WorkflowDef, used to detect when the live definition has drifted from an
+ * instance's pinned snapshot. Sha256 of the def's canonical JSON form,
+ * truncated to 16 hex chars — long enough to be practically collision-free
+ * for this purpose (detecting accidental drift, not an adversarial actor),
+ * short enough to be a legible field in `status` output.
+ */
+export function hashDef(def: WorkflowDef): string {
+  return createHash('sha256').update(JSON.stringify(def)).digest('hex').slice(0, 16);
+}
 
 /**
  * Build a `WorkflowDef` from a parsed YAML object, coercing types and filling

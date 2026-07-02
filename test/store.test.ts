@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Store, StoreVersionError, artifactId, taskId } from '../src/store.ts';
 import { randId } from '../src/util.ts';
 import type { ArtifactData } from '../src/types.ts';
+import { def, step } from './helpers.ts';
 
 function mem(): Store {
   return new Store(':memory:');
@@ -418,6 +419,51 @@ test('insertWorkflow without producedBy has producedBy undefined', () => {
   s.close();
 });
 
+// ---- §28: instance-to-definition pinning (snapshot + hash) round-trip -------
+
+test('insertWorkflow round-trips defSnapshot/defHash', () => {
+  const s = mem();
+  const id = randId('wf');
+  const d = def('delivery', [], [step({ name: 'planner', produces: ['plan'] })]);
+  s.insertWorkflow(id, { def: 'delivery', defSnapshot: d, defHash: 'abc123' });
+  const got = s.getWorkflow(id);
+  assert.ok(got !== undefined, 'workflow must be retrievable');
+  assert.deepEqual(got.defSnapshot, d);
+  assert.equal(got.defHash, 'abc123');
+  s.close();
+});
+
+test('insertWorkflow without defSnapshot/defHash leaves both undefined (legacy-row compatibility)', () => {
+  const s = mem();
+  const id = randId('wf');
+  s.insertWorkflow(id, { def: 'delivery' });
+  const got = s.getWorkflow(id);
+  assert.ok(got !== undefined, 'workflow must be retrievable');
+  assert.equal(got.defSnapshot, undefined);
+  assert.equal(got.defHash, undefined);
+  s.close();
+});
+
+test('repinWorkflowDef overwrites (not merges) the stored snapshot/hash', () => {
+  const s = mem();
+  const id = randId('wf');
+  s.insertWorkflow(id, { def: 'delivery' }); // legacy row, no snapshot
+  assert.equal(s.getWorkflow(id)?.defSnapshot, undefined);
+
+  const d1 = def('delivery', [], [step({ name: 'a', produces: ['x'] })]);
+  s.repinWorkflowDef(id, d1, 'hash1');
+  let got = s.getWorkflow(id);
+  assert.deepEqual(got?.defSnapshot, d1);
+  assert.equal(got?.defHash, 'hash1');
+
+  const d2 = def('delivery', [], [step({ name: 'b', produces: ['y'] })]);
+  s.repinWorkflowDef(id, d2, 'hash2');
+  got = s.getWorkflow(id);
+  assert.deepEqual(got?.defSnapshot, d2);
+  assert.equal(got?.defHash, 'hash2');
+  s.close();
+});
+
 test('findChildByParent returns the child workflow row', () => {
   const s = mem();
   const parentWf = randId('wf');
@@ -541,7 +587,7 @@ test('tx() BEGIN IMMEDIATE: second connection is blocked at BEGIN, not mid-write
 
 test('fresh database stamps schema_version to current SCHEMA_VERSION, no throw', () => {
   const s = mem();
-  assert.equal(s.getMeta('schema_version'), '5');
+  assert.equal(s.getMeta('schema_version'), '6');
   s.close();
 });
 
@@ -552,7 +598,7 @@ test('opening a DB already at current SCHEMA_VERSION is a no-op, no throw', () =
     const s1 = new Store(dbPath);
     s1.close();
     const s2 = new Store(dbPath); // reopen at same version — must not throw
-    assert.equal(s2.getMeta('schema_version'), '5');
+    assert.equal(s2.getMeta('schema_version'), '6');
     s2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -568,7 +614,7 @@ test('opening a DB with an older schema_version upgrades normally (regression gu
     s1.close();
 
     const s2 = new Store(dbPath); // must NOT throw
-    assert.equal(s2.getMeta('schema_version'), '5', 'upgrades to current SCHEMA_VERSION');
+    assert.equal(s2.getMeta('schema_version'), '6', 'upgrades to current SCHEMA_VERSION');
     s2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -581,17 +627,58 @@ test('opening a DB with a newer-than-binary schema_version throws StoreVersionEr
   try {
     // Create a normal DB, then simulate a newer binary having stamped it.
     const s1 = new Store(dbPath);
-    s1.setMeta('schema_version', '6');
+    s1.setMeta('schema_version', '7');
     s1.close();
 
-    // Reopening at this binary's SCHEMA_VERSION ('5') must refuse.
+    // Reopening at this binary's SCHEMA_VERSION ('6') must refuse.
     assert.throws(() => new Store(dbPath), StoreVersionError);
 
     // Direct raw read proves schema_version was NOT rewritten downward by
     // the throwing constructor.
     const raw = new DatabaseSync(dbPath);
     const row = raw.prepare('SELECT v FROM meta WHERE k = ?').get('schema_version') as { v: string };
-    assert.equal(row.v, '6', 'schema_version must remain at the newer stamped value, never rewritten down');
+    assert.equal(row.v, '7', 'schema_version must remain at the newer stamped value, never rewritten down');
+    raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Instance-to-definition pinning (§28): regression pair confirming the
+// SCHEMA_VERSION bump to '6' didn't weaken PR #48's downgrade guard — same
+// assertion shape as above, one version number up.
+test('§28: old-DB-upgrades-fine at the new SCHEMA_VERSION 6 (def_snapshot/def_hash columns present)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'owenloop-schemaver-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const s1 = new Store(dbPath);
+    s1.setMeta('schema_version', '5'); // simulate a pre-pinning on-disk stamp
+    s1.close();
+
+    const s2 = new Store(dbPath); // must NOT throw
+    assert.equal(s2.getMeta('schema_version'), '6');
+    const cols = (s2.db.prepare('PRAGMA table_info(workflow)').all() as Array<{ name: string }>).map((c) => c.name);
+    assert.ok(cols.includes('def_snapshot'));
+    assert.ok(cols.includes('def_hash'));
+    s2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('§28: newer-than-binary (7) still refuses to open at SCHEMA_VERSION 6', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'owenloop-schemaver-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const s1 = new Store(dbPath);
+    s1.setMeta('schema_version', '8');
+    s1.close();
+
+    assert.throws(() => new Store(dbPath), StoreVersionError);
+
+    const raw = new DatabaseSync(dbPath);
+    const row = raw.prepare('SELECT v FROM meta WHERE k = ?').get('schema_version') as { v: string };
+    assert.equal(row.v, '8', 'schema_version must remain at the newer stamped value, never rewritten down');
     raw.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

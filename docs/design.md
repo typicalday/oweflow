@@ -985,3 +985,103 @@ routing itself (which allowlist an entry is checked against) is decided by
 check in `buildStep` — exactly the same discriminator logic already used to
 dispatch parsing — so the unknown-key check can never accidentally validate
 an entry against the wrong shape's allowlist.
+
+## §28 Instance-to-definition pinning
+
+Every prior section treats a workflow *definition* as the stable thing and a
+workflow *instance* as ephemeral state layered on top of it, resolved by
+name each time the engine needs it (`resolveDef(wf.def)`). That's fine as
+long as the YAML on disk doesn't change underneath a long-running instance —
+but a dataflow engine's whole point is to outlive a single edit-deploy
+cycle. Before this change, editing a definition's `body:`, adding a step, or
+changing what a step consumes would silently rewire every in-flight instance
+of that definition on its very next `tick`, mid-flight, with no record that
+anything had shifted.
+
+### §28.1 Snapshot + hash at `createInstance`
+
+`createInstance` now stamps two extra columns on the `workflow` row:
+`def_snapshot` (the fully-expanded `WorkflowDef` — post `include:`/`calls:`
+expansion, i.e. exactly what the engine would otherwise have re-resolved by
+name — serialized verbatim as JSON) and `def_hash` (`hashDef(def)`, defined
+in defs.ts as `sha256(JSON.stringify(def)).slice(0, 16)`). Hashing is
+deterministic because `buildDef`/`parseDef`/`expandIncludes` always
+construct a `WorkflowDef` with stable field order and never leave stray
+`_includes` remnants on an expanded def (`expandIncludes` explicitly sets
+`_includes: undefined` once expansion is done).
+
+This is a permanent, additive schema change (`SCHEMA_VERSION` bumped to
+`'6'`), not a one-time migration script: rows written before this feature
+shipped simply have `def_snapshot`/`def_hash` as `NULL`/absent, forever --
+there is no backfill, and none is needed (see §28.2's fallback).
+
+### §28.2 `defFor` — the resolution chokepoint, now pin-aware
+
+`Engine.defFor(workflow)` is the single place the engine turns an instance
+id into the `WorkflowDef` it should run against. It now prefers the pin:
+
+```
+private defFor(workflow: string): WorkflowDef {
+  const wf = this.store.getWorkflow(workflow);
+  if (!wf) throw new Error(`no such workflow instance: ${workflow}`);
+  if (wf.defSnapshot !== undefined) return wf.defSnapshot;
+  return this.resolveDef(wf.def);       // legacy fallback, not an error
+}
+```
+
+A row with no snapshot (created before this feature existed) falls back to
+today's by-name resolution, unchanged — this is permanent backward-compatible
+behavior, not a deprecation path. Only two direct `resolveDef` calls remain
+in engine.ts outside of `defFor` itself: `createInstance` (which has no
+instance yet to pin against) and `adopt` (§28.4, which deliberately wants the
+*current* live def, not the pin). Every other call site — including the
+`calls:`/`include:` cascade paths `maintainCalls` (resolving a called child's
+def) and `triggerParentIfChild` (resolving a parent's def when re-triggering
+it) — goes through `defFor`, so a pinned child or parent instance is
+respected during Mode 1/Mode 2 cascades too, not just on its own direct
+`tick`.
+
+### §28.3 `defDrift` — informational, never a refusal
+
+`status()` now returns an extra optional field, `defDrift?: boolean`,
+computed by re-resolving the definition by name and comparing its hash
+against the pinned `defHash`:
+
+- `false` — the live def (if it still resolves) hashes the same as the pin.
+- `true` — the live def now resolves to something different.
+- absent — the live def no longer resolves at all (deleted, renamed, defs
+  dir doesn't have it) or the instance predates pinning and has never been
+  hashed; `status()` tolerates this via try/catch rather than throwing.
+
+Critically, `defDrift` is informational only. The engine keeps advancing the
+instance off its pinned snapshot regardless of drift — there is no
+refuse-to-tick, no thrown `DefDriftError`, no partial-degraded mode. Drift is
+something an operator (or a wiring/dashboard) can *notice* and act on, not
+something the engine enforces. This is a deliberate design choice: the
+engine's job is to keep a running instance's contract stable, not to police
+whether the source has moved on.
+
+### §28.4 `adopt` — deliberate re-pinning
+
+`owenloop adopt <wf>` (`Engine.adopt(workflow)`) is the only way an instance
+moves off its original pin, and it is always an explicit operator action,
+never automatic:
+
+1. Re-resolve the definition by name (`resolveDef(wf.def)`) — the current
+   live shape.
+2. Re-hash it and overwrite the stored `def_snapshot`/`def_hash`
+   (`Store.repinWorkflowDef`) in the same transaction as step 3.
+3. Run `settle()` against the *new* def, so any debts the new shape
+   introduces (new steps, new `consumes`/`produces`) materialize
+   immediately rather than waiting to be discovered lazily.
+
+`settle()`/`pendingOwed()` only ever materializes new **step outputs** as
+debts — a workflow's declared `inputs:` are seeded exactly once, inside
+`createInstance`. Adopting a def that adds a new input (rather than a new
+step) will not retroactively ask for that input; only new step-level
+`produces` show up as fresh debts after an `adopt`. This is worth knowing
+before assuming `adopt` reconciles *every* possible shape of definition
+change — it reconciles the step graph, not workflow-level input contracts.
+
+`adopt` returns `{ workflow, defHash, previousHash? }` (`previousHash` is
+omitted for a legacy pre-pinning row that had no prior hash to report).

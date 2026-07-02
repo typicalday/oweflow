@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { parseProduce } from '../src/paths.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildDef, DefError, lintDef, loadDefFile, loadDefs, parseDef, validateDef } from '../src/defs.ts';
+import { buildDef, DefError, hashDef, lintDef, loadDefFile, loadDefs, parseDef, validateDef } from '../src/defs.ts';
 import { def, input, step } from './helpers.ts';
 
 const delivery = {
@@ -1862,3 +1862,30 @@ test('§27 (13) engine: is scoped per-file — an included/called child with a d
 function mktempDefsDir(): string {
   return mkdtempSync(join(tmpdir(), 'owenloop-defs-engine-'));
 }
+
+// ---- §28: hashDef — content-hash purity for instance-to-definition pinning --
+
+test('§28 hashDef: structurally-equal defs hash identically', () => {
+  const a = def('delivery', [], [step({ name: 'planner', produces: ['plan'] })]);
+  const b = def('delivery', [], [step({ name: 'planner', produces: ['plan'] })]);
+  assert.equal(hashDef(a), hashDef(b));
+});
+
+test('§28 hashDef: changing a step body changes the hash', () => {
+  const a = def('delivery', [], [step({ name: 'planner', produces: ['plan'], body: 'plan A' })]);
+  const b = def('delivery', [], [step({ name: 'planner', produces: ['plan'], body: 'plan B' })]);
+  assert.notEqual(hashDef(a), hashDef(b));
+});
+
+test('§28 hashDef: adding an input changes the hash', () => {
+  const a = def('delivery', [], [step({ name: 'planner', produces: ['plan'] })]);
+  const b = def('delivery', [input('extra')], [step({ name: 'planner', produces: ['plan'] })]);
+  assert.notEqual(hashDef(a), hashDef(b));
+});
+
+test('§28 hashDef: is a short hex string', () => {
+  const a = def('delivery', [], [step({ name: 'planner', produces: ['plan'] })]);
+  const h = hashDef(a);
+  assert.equal(h.length, 16);
+  assert.match(h, /^[0-9a-f]{16}$/);
+});

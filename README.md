@@ -221,6 +221,7 @@ Global flags: `--db <path>` (env `OWENLOOP_DB`, default `.owenloop/state.db`) an
 | `retry <wf> <path> [--by a] [--text guidance]` | clear a stall, reset the counter |
 | `close <wf> <run> [--outcome ok\|no_work\|failed\|skipped] [--summary s]` | release a claimed job |
 | `delete <wf>` | delete an instance and all its rows |
+| `adopt <wf>` | re-pin an instance to the current definition and settle any new debts |
 
 **Exit codes for `green` / `emit` / `seal` / `reject`:** these exit non-zero when the
 engine refuses the commit or verdict (born-rejected, or a schema failure for `green` /
@@ -256,6 +257,25 @@ A worker reads `prompt` + `consumes` + `owes`, does the work, reports with `gree
 (or `emit`/`seal` for collections), then `close`s the job. The reject counts in
 `owes[]` let a workflow escalate on its own — e.g. switch to a stronger model after
 two rejections — before the engine stalls the step.
+
+### Instance pinning — editing a workflow definition mid-flight
+
+`create` snapshots the fully-expanded definition (post `include:`/`calls:`) onto the
+instance, along with a content hash. Every later `tick`/`status`/`green`/etc. on that
+instance resolves against its own snapshot, not the live YAML — so editing a
+definition's `body:`, adding a step, or changing what a step consumes never rewires an
+instance that's already in flight. Instances created before this feature shipped have
+no snapshot and keep resolving by name, as before — that fallback is permanent, not a
+deprecation path.
+
+`status` surfaces this as an informational `defDrift: true|false` (or omitted, if the
+live definition no longer resolves at all): the engine never refuses to advance a
+drifted instance, it just tells you the source has moved on. To deliberately move an
+instance onto the current definition, run `owenloop adopt <wf>` — it re-snapshots and
+re-hashes the pin, then settles the instance so any debts the new shape introduces
+(new steps, changed `consumes`/`produces`) show up right away. `adopt` only surfaces
+new **step** outputs as debts; a workflow's `inputs:` are seeded once at `create` and
+are not retroactively re-requested.
 
 ---
 

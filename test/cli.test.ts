@@ -264,7 +264,17 @@ test('missing positional args fail with a labelled error', () => {
 
 test('list tolerates a workflow whose definition is no longer available (done: null)', () => {
   const { run, db, home } = makeCli();
-  const wf = run('create', 'delivery', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+  // §28: `create` now always pins a snapshot, so a normally-created instance
+  // survives its def going missing (see the dedicated pinning test below,
+  // "list keeps working off the pin..."). To exercise the true legacy path —
+  // an un-pinned row with no snapshot to fall back on — insert one directly,
+  // the same way store.test.ts's legacy-row tests do, bypassing `create`.
+  run('list'); // ensures the db file + schema exist before we poke it directly
+  const raw = new DatabaseSync(db);
+  raw.prepare(
+    `INSERT INTO workflow (id, def, title, params, created_at) VALUES (?, ?, ?, ?, ?)`,
+  ).run('wf_legacy_no_pin', 'delivery', null, '{}', Date.now());
+  raw.close();
 
   // re-open against a defs dir that no longer contains 'delivery' — status can't be derived
   const noDefs = mkdtempSync(join(tmpdir(), 'owenloop-nodefs-'));
@@ -272,8 +282,24 @@ test('list tolerates a workflow whose definition is no longer available (done: n
   const code = main(['list'], { cwd: home, env: { OWENLOOP_DB: db, OWENLOOP_DEFS: noDefs }, out: (s) => out.push(s), err: () => {} });
   const list = JSON.parse(out.join('\n'));
   assert.equal(code, 0, 'list still succeeds');
-  assert.equal(list[0].id, wf, 'the instance is still listed');
-  assert.equal(list[0].done, null, 'done is null when the def is missing, not a crash');
+  assert.equal(list[0].id, 'wf_legacy_no_pin', 'the instance is still listed');
+  assert.equal(list[0].done, null, 'done is null when the def is missing and there is no pin to fall back on');
+});
+
+test('§28: list keeps working off the pin for a normally-created instance even after its def goes missing', () => {
+  const { run, db, home } = makeCli();
+  const wf = run('create', 'delivery', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+
+  // re-open against a defs dir that no longer contains 'delivery' — a
+  // pre-pinning instance would have degraded to done: null (see the test
+  // above); a pinned instance keeps deriving real status off its snapshot.
+  const noDefs = mkdtempSync(join(tmpdir(), 'owenloop-nodefs-'));
+  const out: string[] = [];
+  const code = main(['list'], { cwd: home, env: { OWENLOOP_DB: db, OWENLOOP_DEFS: noDefs }, out: (s) => out.push(s), err: () => {} });
+  const list = JSON.parse(out.join('\n'));
+  assert.equal(code, 0);
+  assert.equal(list[0].id, wf);
+  assert.equal(list[0].done, false, 'the pinned instance still derives a real status, not null');
 });
 
 // ---- status --all (the fleet read) ------------------------------------------
@@ -304,7 +330,16 @@ test('status --all returns one full status entry per instance, with identity + t
 
 test('status --all isolates an instance whose definition is missing (error field, no crash)', () => {
   const { run, db, home } = makeCli();
-  const wf = run('create', 'delivery', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+  // §28: `create` now always pins a snapshot, so this test — which is
+  // specifically about the "def missing entirely, no way to derive status"
+  // path — needs a genuinely un-pinned (pre-pinning-era) row. Insert one
+  // directly, same as the analogous `list` test above.
+  run('status', '--all'); // ensures the db file + schema exist before we poke it directly
+  const raw = new DatabaseSync(db);
+  raw.prepare(
+    `INSERT INTO workflow (id, def, title, params, created_at) VALUES (?, ?, ?, ?, ?)`,
+  ).run('wf_legacy_no_pin', 'delivery', null, '{}', Date.now());
+  raw.close();
 
   // re-open against a defs dir without 'delivery' — status can't be derived
   const noDefs = mkdtempSync(join(tmpdir(), 'owenloop-nodefs-'));
@@ -313,9 +348,24 @@ test('status --all isolates an instance whose definition is missing (error field
   const all = JSON.parse(out.join('\n'));
   assert.equal(code, 0, 'the fleet read still succeeds');
   assert.equal(all.length, 1);
-  assert.equal(all[0].workflow, wf, 'identity is still reported from the stored row');
+  assert.equal(all[0].workflow, 'wf_legacy_no_pin', 'identity is still reported from the stored row');
   assert.match(all[0].error, /unknown workflow definition/, 'status failure degrades to an error field');
-  assert.equal(all[0].done, undefined, 'no derived status when the def is missing');
+  assert.equal(all[0].done, undefined, 'no derived status when the def is missing and there is no pin to fall back on');
+});
+
+test('§28: status --all keeps deriving real status for a pinned instance even after its def goes missing', () => {
+  const { run, db, home } = makeCli();
+  const wf = run('create', 'delivery', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+
+  const noDefs = mkdtempSync(join(tmpdir(), 'owenloop-nodefs-'));
+  const out: string[] = [];
+  const code = main(['status', '--all'], { cwd: home, env: { OWENLOOP_DB: db, OWENLOOP_DEFS: noDefs }, out: (s) => out.push(s), err: () => {} });
+  const all = JSON.parse(out.join('\n'));
+  assert.equal(code, 0);
+  assert.equal(all.length, 1);
+  assert.equal(all[0].workflow, wf);
+  assert.equal(all[0].error, undefined, 'no error — the pin makes the live def unnecessary');
+  assert.equal(typeof all[0].done, 'boolean', 'real derived status from the pinned snapshot');
 });
 
 test('status --all surfaces a producer crash step (consecutive failedRuns) per debt', () => {
@@ -664,4 +714,114 @@ test('emit: schema-rejected exits non-zero and still prints result JSON', () => 
   assert.equal(r.code, 1);
   assert.notEqual(r.json().outcome, 'emitted');
   assert.ok(r.err.length > 0);
+});
+
+// ---- §28: instance-to-definition pinning (adopt, status defDrift) ----------
+
+/** Two temp defs dirs, both defining a workflow named 'pinnable', with a
+ *  structural difference (dirB adds a 'notifier' step off 'verdict' producing
+ *  'notice', a fresh debt to prove adopt's settle() ran). Mirrors the "reopen
+ *  main() against a different OWENLOOP_DEFS, same db" pattern already used by
+ *  the `list`/`status --all` "definition missing" tests above — the closest
+ *  precedent in this file for varying the live def between two CLI calls. */
+function pinnableDefDirs(): { dirA: string; dirB: string } {
+  const dirA = mkdtempSync(join(tmpdir(), 'owenloop-pin-a-'));
+  const dirB = mkdtempSync(join(tmpdir(), 'owenloop-pin-b-'));
+  const yamlA = [
+    'name: pinnable',
+    'inputs:',
+    '  - name: proposal',
+    'steps:',
+    '  - name: planner',
+    '    consumes: [proposal]',
+    '    produces: [plan]',
+    '  - name: builder',
+    '    consumes: [plan]',
+    '    produces: [pr]',
+    '  - name: reviewer',
+    '    consumes: [pr]',
+    '    produces: [verdict]',
+    '    terminal: true',
+    '',
+  ].join('\n');
+  const yamlB = [
+    'name: pinnable',
+    'inputs:',
+    '  - name: proposal',
+    'steps:',
+    '  - name: planner',
+    '    consumes: [proposal]',
+    '    produces: [plan]',
+    '  - name: builder',
+    '    consumes: [plan]',
+    '    produces: [pr]',
+    '  - name: reviewer',
+    '    consumes: [pr]',
+    '    produces: [verdict]',
+    '  - name: notifier',
+    '    consumes: [verdict]',
+    '    produces: [notice]',
+    '    terminal: true',
+    '',
+  ].join('\n');
+  writeFileSync(join(dirA, 'pinnable.yaml'), yamlA);
+  writeFileSync(join(dirB, 'pinnable.yaml'), yamlB);
+  return { dirA, dirB };
+}
+
+test('owenloop status <wf> reports no defDrift when the live def has not changed', () => {
+  const { dirA } = pinnableDefDirs();
+  const { run } = makeCli({ defs: dirA });
+  const wf = run('create', 'pinnable', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+  const status = run('status', wf).json();
+  assert.equal(status.defDrift, false);
+});
+
+test('owenloop status <wf> reports defDrift: true once the live def diverges from the pin', () => {
+  const { dirA, dirB } = pinnableDefDirs();
+  const { run, db, home } = makeCli({ defs: dirA });
+  const wf = run('create', 'pinnable', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+
+  // Reopen main() against dirB (same db, a structurally different 'pinnable').
+  const out: string[] = [];
+  const code = main(['status', wf], { cwd: home, env: { OWENLOOP_DB: db, OWENLOOP_DEFS: dirB }, out: (s) => out.push(s), err: () => {} });
+  assert.equal(code, 0);
+  const status = JSON.parse(out.join('\n'));
+  assert.equal(status.defDrift, true);
+});
+
+test('owenloop adopt <wf> re-pins to the current def and settles a newly-introduced debt', () => {
+  const { dirA, dirB } = pinnableDefDirs();
+  const { run, db, home } = makeCli({ defs: dirA });
+  const wf = run('create', 'pinnable', '--provide', `proposal=${J({ text: 'x' })}`).json().workflow;
+
+  const callAgainst = (defs: string, ...argv: string[]) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = main(argv, { cwd: home, env: { OWENLOOP_DB: db, OWENLOOP_DEFS: defs }, out: (s) => out.push(s), err: (s) => err.push(s) });
+    return { code, out: out.join('\n'), err: err.join('\n'), json: () => JSON.parse(out.join('\n')) };
+  };
+
+  // adopt against dirB (the changed def)
+  const adoptRes = callAgainst(dirB, 'adopt', wf);
+  assert.equal(adoptRes.code, 0);
+  const body = adoptRes.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.workflow, wf);
+  assert.equal(typeof body.defHash, 'string');
+  assert.equal(typeof body.previousHash, 'string');
+
+  // subsequent status (still against dirB) shows no drift and the new debt
+  const statusRes = callAgainst(dirB, 'status', wf);
+  const status = statusRes.json();
+  assert.equal(status.defDrift, false);
+  assert.ok(status.debts.some((d: any) => d.path === 'notice'), 'adopt must settle() the new notifier step debt');
+});
+
+test('owenloop adopt on an unknown workflow id exits non-zero with a clear message', () => {
+  const { dirA } = pinnableDefDirs();
+  const { run } = makeCli({ defs: dirA });
+  const r = run('adopt', 'wf_does_not_exist');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /no such workflow instance/);
 });

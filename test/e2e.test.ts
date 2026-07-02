@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -23,7 +23,13 @@ interface RawResult {
 }
 
 function raw(db: string, args: string[]): RawResult {
-  const res = spawnSync(process.execPath, [BIN, ...args, '--db', db, '--defs', DEFS], {
+  return rawAgainst(db, DEFS, args);
+}
+
+/** Like `raw`, but against an explicit defs dir instead of the shipped examples —
+ *  used by the §28 pinning test, which must edit its own throwaway def mid-test. */
+function rawAgainst(db: string, defsDir: string, args: string[]): RawResult {
+  const res = spawnSync(process.execPath, [BIN, ...args, '--db', db, '--defs', defsDir], {
     encoding: 'utf8',
   });
   return { status: res.status ?? -1, stdout: res.stdout, stderr: res.stderr };
@@ -33,6 +39,18 @@ function raw(db: string, args: string[]): RawResult {
 function makeCli(db: string) {
   return (...args: string[]): any => {
     const r = raw(db, args);
+    if (r.status !== 0) {
+      throw new Error(`owenloop ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
+    }
+    const out = r.stdout.trim();
+    return out ? JSON.parse(out) : null;
+  };
+}
+
+/** Like `makeCli`, but against an explicit defs dir. */
+function makeCliAgainst(db: string, defsDir: string) {
+  return (...args: string[]): any => {
+    const r = rawAgainst(db, defsDir, args);
     if (r.status !== 0) {
       throw new Error(`owenloop ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
     }
@@ -296,4 +314,106 @@ test('list and defs reflect created instances', () => {
   assert.deepEqual(ow('list'), []);
 
   rmSync(join(db, '..'), { recursive: true, force: true });
+});
+
+// ---- §28: instance-to-definition pinning ------------------------------------
+
+test('§28: an in-flight instance stays pinned to its original def shape after the source YAML is edited, and `adopt` re-wires it deliberately', () => {
+  const db = tmpDb();
+  const defsDir = mkdtempSync(join(tmpdir(), 'owenloop-e2e-pin-'));
+  const yamlPath = join(defsDir, 'pinnable.yaml');
+  const ow = makeCliAgainst(db, defsDir);
+
+  const original = [
+    'name: pinnable',
+    'inputs:',
+    '  - name: proposal',
+    'steps:',
+    '  - name: planner',
+    '    consumes: [proposal]',
+    '    produces: [plan]',
+    '    body: "original prompt"',
+    '  - name: builder',
+    '    consumes: [plan]',
+    '    produces: [pr]',
+    '    terminal: true',
+    '',
+  ].join('\n');
+  writeFileSync(yamlPath, original);
+
+  // 1. Create an instance against the original shape.
+  const wf = ow('create', 'pinnable', '--provide', `proposal=${JSON.stringify({ text: 'ship it' })}`).workflow;
+  let st = ow('status', wf);
+  assert.equal(st.defDrift, false, 'no drift yet — the source has not moved');
+
+  // 2. Edit the YAML on disk: change planner's body AND add a brand-new step
+  // (notifier) so there's both a "changed prompt" and a "fresh debt" to prove
+  // out.
+  const edited = [
+    'name: pinnable',
+    'inputs:',
+    '  - name: proposal',
+    'steps:',
+    '  - name: planner',
+    '    consumes: [proposal]',
+    '    produces: [plan]',
+    '    body: "brand new prompt"',
+    '  - name: builder',
+    '    consumes: [plan]',
+    '    produces: [pr]',
+    '  - name: notifier',
+    '    consumes: [pr]',
+    '    produces: [notice]',
+    '    terminal: true',
+    '',
+  ].join('\n');
+  writeFileSync(yamlPath, edited);
+
+  // 3. tick the ALREADY-CREATED instance: it must still behave per the
+  // ORIGINAL (pinned) shape — planner's prompt/body must still be the old
+  // one, not the new one, and no 'notice' debt should appear (that step
+  // doesn't exist in the pinned snapshot).
+  const t1 = ow('tick', wf);
+  const plannerOrder = orderFor(t1, 'planner');
+  assert.match(plannerOrder.prompt, /original prompt/, 'pinned instance must use the ORIGINAL body, not the edited one');
+
+  ow('green', wf, plannerOrder.run, 'plan', '--value', JSON.stringify({ v: 1 }));
+  ow('close', wf, plannerOrder.run);
+
+  st = ow('status', wf);
+  assert.ok(!st.debts.some((d: any) => d.path === 'notice'), 'pinned instance must not know about the notifier step added after it was created');
+
+  // 4. status now reports defDrift: true — the live def has moved on.
+  st = ow('status', wf);
+  assert.equal(st.defDrift, true);
+
+  // 5. Deliberately adopt the new shape.
+  const adoptRes = ow('adopt', wf);
+  assert.equal(adoptRes.ok, true);
+  assert.equal(adoptRes.workflow, wf);
+  assert.equal(typeof adoptRes.defHash, 'string');
+  assert.equal(typeof adoptRes.previousHash, 'string');
+  assert.notEqual(adoptRes.defHash, adoptRes.previousHash);
+
+  // 6. subsequent status: drift is cleared, and the new notifier debt has
+  // materialized (proves settle() ran as part of adopt).
+  st = ow('status', wf);
+  assert.equal(st.defDrift, false);
+  assert.ok(st.debts.some((d: any) => d.path === 'notice'), 'adopt must settle() so the new notifier debt materializes immediately');
+
+  // 7. the instance now behaves per the NEW shape on the next tick: builder
+  // is no longer terminal, and a subsequent notifier step is reachable once
+  // pr is greened.
+  builder: {
+    const tb = ow('tick', wf);
+    const builderOrder = orderFor(tb, 'builder');
+    ow('green', wf, builderOrder.run, 'pr', '--value', JSON.stringify({ n: 1 }));
+    ow('close', wf, builderOrder.run);
+  }
+  const tn = ow('tick', wf);
+  const notifierOrder = orderFor(tn, 'notifier');
+  assert.ok(notifierOrder, 'notifier step (only present in the adopted shape) is now reachable');
+
+  rmSync(join(db, '..'), { recursive: true, force: true });
+  rmSync(defsDir, { recursive: true, force: true });
 });
