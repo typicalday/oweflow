@@ -146,6 +146,15 @@ order-independent — re-running `settle()` on a healthy graph yields no ops.
   (`sealOf = src`); the collection is "complete" when the seal is green.
 - **§11.2 map `src[$i]`** — fan-out: one firing per element, `${INDEX}` bound.
 - **§11.x reduce `src[*]`** — fan-in: see §3.
+- **§11.x reduce with suffix `src[*].child`** — fan-in one level deeper: the
+  gate is the seal green AND every surviving member's `.child` artifact
+  green (not the bare member). Typically fans in over a map step's
+  per-element output (`src[$i].child`). Resting inputs / cascade: the
+  firing (and the reduce output's fingerprint) rest on the child paths, not
+  the bare members — a child rejected or re-greened after the reduce fired
+  knocks it back via the ordinary §11.8 forward cascade, no special-case
+  machinery. One suffix level only (`src[*].a.b` is a parse error). Bare
+  `src[*]` is unchanged (suffix is empty).
 - **§11.3** — the six-state lifecycle (above).
 - **§11.8** — the forward cascade (above).
 - **§11.9** — the three reject kinds (above): judgment, validation (§19), structural.

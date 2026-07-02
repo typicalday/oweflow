@@ -49,12 +49,23 @@ test('parseConsume — plain / map / reduce', () => {
   const reduce = parseConsume('gather.source[*]');
   assert.equal(reduce.mode, 'reduce');
   assert.equal(reduce.stem, 'gather.source');
+  assert.equal(reduce.suffix, '');
+});
+
+test('parseConsume — reduce with a single-level suffix', () => {
+  const reduce = parseConsume('gather.source[*].child');
+  assert.equal(reduce.mode, 'reduce');
+  assert.equal(reduce.stem, 'gather.source');
+  assert.equal(reduce.suffix, '.child');
+});
+
+test('parseConsume rejects a multi-level reduce suffix', () => {
+  assert.throws(() => parseConsume('gather.source[*].a.b'));
 });
 
 test('parseConsume rejects collection-decl and literal index', () => {
   assert.throws(() => parseConsume('gather.source[]'));
   assert.throws(() => parseConsume('gather.source[3]'));
-  assert.throws(() => parseConsume('gather.source[*].x')); // reduce with suffix
 });
 
 test('parseProduce — singleton / collection / map', () => {
@@ -100,6 +111,12 @@ test('matchConsume — reduce matches every bare member', () => {
   assert.deepEqual(matchConsume(p, 'gather.source[0]'), { index: 0 });
   assert.deepEqual(matchConsume(p, 'gather.source[99]'), { index: 99 });
   assert.equal(matchConsume(p, 'gather.source[0].formatcheck'), null);
+});
+
+test('matchConsume — suffixed reduce matches the child lane, not the bare member', () => {
+  const p = parseConsume('gather.source[*].child');
+  assert.deepEqual(matchConsume(p, 'gather.source[0].child'), { index: 0 });
+  assert.equal(matchConsume(p, 'gather.source[0]'), null);
 });
 
 test('bindProduce / elementPath', () => {

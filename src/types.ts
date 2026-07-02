@@ -453,6 +453,8 @@ export interface GraphEdge {
   mode: 'plain' | 'map' | 'reduce'; // consume mode at the to-node
   /** For map: the binder name (e.g. "i") — used for label generation */
   binder?: string;
+  /** For reduce: the suffix, if any (e.g. ".child") — used for label generation */
+  suffix?: string;
 }
 
 /** The complete wiring graph for one workflow definition. */

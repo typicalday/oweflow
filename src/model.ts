@@ -125,6 +125,16 @@ export function mapProduce(step: StepDef): ProducePattern | undefined {
 export function mapInputPath(mc: ConsumePattern, index: number): string {
   return elementPath(mc.stem, index, mc.suffix);
 }
+/**
+ * The concrete input artifact a reduce fan-in gates on for member index `i`.
+ * Normally the bare collection member `stem[i]`. But when the reduce consume
+ * carries a suffix (`stem[*].child` — fan-in over a map step's per-element
+ * output), the gate is that suffixed per-element child `stem[i].child`, not
+ * the bare member. Mirrors mapInputPath's suffix-chaining trick one level up.
+ */
+export function reduceInputPath(rc: ConsumePattern, index: number): string {
+  return elementPath(rc.stem, index, rc.suffix);
+}
 /** The collection stem a step produces (`gather.source` for `gather.source[]`), if any. */
 export function collectionStem(step: StepDef): string | undefined {
   return step.produces.find((p) => p.kind === 'collection')?.stem;
@@ -259,7 +269,11 @@ export function requiredInputs(def: WorkflowDef, arts: ArtifactMap, art: Artifac
   const rc = reduceConsume(step);
   if (rc) {
     const live = members(arts, rc.stem).filter((m) => !isSettledOut(m));
-    return [...live.map((m) => m.path), sealPath(rc.stem), ...plain];
+    const memberInputs = live.map((m) => {
+      const el = parseElement(m.path);
+      return el ? reduceInputPath(rc, el.index) : m.path;
+    });
+    return [...memberInputs, sealPath(rc.stem), ...plain];
   }
   return plain;
 }
@@ -467,7 +481,12 @@ export function eligibleFirings(def: WorkflowDef, arts: ArtifactMap, time?: Time
           if (isGreen(seal)) {
             const mem = members(arts, rc.stem);
             const live = mem.filter((m) => !isSettledOut(m));
-            if (!live.some((m) => !isGreen(m))) {
+            const liveInputPaths = live.map((m) => {
+              const el = parseElement(m.path)!; // members() only returns bare elements
+              return reduceInputPath(rc, el.index);
+            });
+            const allChildrenGreen = liveInputPaths.every((p) => isGreen(arts.get(p)));
+            if (allChildrenGreen) {
               const outs = singletonProduces(step)
                 .map((p) => p.stem)
                 .filter((p) => {
@@ -478,7 +497,7 @@ export function eligibleFirings(def: WorkflowDef, arts: ArtifactMap, time?: Time
                 firings.push({
                   step: step.name,
                   key: '',
-                  inputs: [...live.map((m) => m.path), sealPath(rc.stem), ...plainPaths],
+                  inputs: [...liveInputPaths, sealPath(rc.stem), ...plainPaths],
                   outputs: outs,
                 });
               }
@@ -900,7 +919,13 @@ function blockingInputs(def: WorkflowDef, step: StepDef, arts: ArtifactMap): str
     const seal = sealPath(rc.stem);
     if (!isGreen(arts.get(seal))) out.push(seal);
     for (const m of members(arts, rc.stem)) {
-      if (!isSettledOut(m) && !isGreen(m)) out.push(m.path);
+      if (isSettledOut(m)) continue;
+      // bare reduce (rc.suffix === '') gates on the member itself; a suffixed
+      // reduce gates on the member's child (reduceInputPath degenerates to
+      // m.path when the suffix is empty, same trick as eligibleFirings).
+      const el = parseElement(m.path);
+      const gatePath = el ? reduceInputPath(rc, el.index) : m.path;
+      if (!isGreen(arts.get(gatePath))) out.push(gatePath);
     }
   }
   // a map child that owes but can't fire is blocked on its per-element input
@@ -1156,6 +1181,7 @@ export function buildGraph(
         mode: c.mode,
       };
       if (c.binder !== undefined) edge.binder = c.binder;
+      if (c.mode === 'reduce' && c.suffix !== '') edge.suffix = c.suffix;
       edges.push(edge);
     }
   }
@@ -1329,7 +1355,7 @@ export function graphToDot(g: WorkflowGraph): string {
       edgeAttrs.push(`label="map [${dotEscape(edge.binder ?? '$i')}]"`);
       edgeAttrs.push('style=dashed');
     } else if (edge.mode === 'reduce') {
-      edgeAttrs.push('label="reduce [*]"');
+      edgeAttrs.push(`label="reduce [*]${dotEscape(edge.suffix ?? '')}"`);
       edgeAttrs.push('style=bold');
     } else {
       edgeAttrs.push('style=solid');
@@ -1407,7 +1433,7 @@ export function graphToMermaid(g: WorkflowGraph): string {
     if (edge.mode === 'map') {
       lines.push(`  ${from} -->|"map [${mmdEscape(edge.binder ?? '$i')}]"| ${to}`);
     } else if (edge.mode === 'reduce') {
-      lines.push(`  ${from} -->|"reduce [*]"| ${to}`);
+      lines.push(`  ${from} -->|"reduce [*]${mmdEscape(edge.suffix ?? '')}"| ${to}`);
     } else {
       lines.push(`  ${from} --> ${to}`);
     }
