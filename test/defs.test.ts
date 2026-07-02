@@ -1670,19 +1670,19 @@ test('loadDefs end-to-end on examples/workflows yields provisioned-delivery and 
   assert.deepEqual(deliverStep.callsInputs, { proposal: 'proposal' });
 });
 
-// ---- §26: engine: version + unknown-key rejection -------------------------
+// ---- §27: engine: version + unknown-key rejection -------------------------
 
-test('§26 (1) engine: omitted defaults to SUPPORTED_ENGINE_VERSION', () => {
+test('§27 (1) engine: omitted defaults to SUPPORTED_ENGINE_VERSION', () => {
   const parsed = parseDef(delivery);
   assert.equal(parsed.engine, 1);
 });
 
-test('§26 (2) engine: 1 (the supported version) is accepted', () => {
+test('§27 (2) engine: 1 (the supported version) is accepted', () => {
   const parsed = parseDef({ ...delivery, engine: 1 });
   assert.equal(parsed.engine, 1);
 });
 
-test('§26 (3) engine: 2 (an unsupported version) throws DefError', () => {
+test('§27 (3) engine: 2 (an unsupported version) throws DefError', () => {
   assert.throws(
     () => buildDef({ ...delivery, engine: 2 }),
     (e: unknown) =>
@@ -1693,42 +1693,42 @@ test('§26 (3) engine: 2 (an unsupported version) throws DefError', () => {
   );
 });
 
-test('§26 (4) engine: 0 (non-positive) throws DefError', () => {
+test('§27 (4) engine: 0 (non-positive) throws DefError', () => {
   assert.throws(
     () => buildDef({ ...delivery, engine: 0 }),
     (e: unknown) => e instanceof DefError && /positive integer/.test((e as Error).message),
   );
 });
 
-test('§26 (5) engine: -1 (negative) throws DefError', () => {
+test('§27 (5) engine: -1 (negative) throws DefError', () => {
   assert.throws(
     () => buildDef({ ...delivery, engine: -1 }),
     (e: unknown) => e instanceof DefError && /positive integer/.test((e as Error).message),
   );
 });
 
-test('§26 (6) engine: 1.5 (non-integer) throws DefError', () => {
+test('§27 (6) engine: 1.5 (non-integer) throws DefError', () => {
   assert.throws(
     () => buildDef({ ...delivery, engine: 1.5 }),
     (e: unknown) => e instanceof DefError && /positive integer/.test((e as Error).message),
   );
 });
 
-test('§26 (7) engine: "1" (a string, wrong type) throws DefError', () => {
+test('§27 (7) engine: "1" (a string, wrong type) throws DefError', () => {
   assert.throws(
     () => buildDef({ ...delivery, engine: '1' }),
     (e: unknown) => e instanceof DefError && /positive integer/.test((e as Error).message),
   );
 });
 
-test('§26 (8) unknown top-level key throws DefError naming the key', () => {
+test('§27 (8) unknown top-level key throws DefError naming the key', () => {
   assert.throws(
     () => buildDef({ ...delivery, bogus: true }),
     (e: unknown) => e instanceof DefError && /unknown key 'bogus'/.test((e as Error).message),
   );
 });
 
-test('§26 (9) unknown key on a normal step throws DefError naming the key', () => {
+test('§27 (9) unknown key on a normal step throws DefError naming the key', () => {
   assert.throws(
     () => buildDef({
       name: 'wf',
@@ -1739,7 +1739,7 @@ test('§26 (9) unknown key on a normal step throws DefError naming the key', () 
   );
 });
 
-test('§26 (10) unknown key on an input, a produce mapping, and a judge entry each throw DefError', () => {
+test('§27 (10) unknown key on an input, a produce mapping, and a judge entry each throw DefError', () => {
   assert.throws(
     () => buildDef({
       name: 'wf',
@@ -1770,7 +1770,7 @@ test('§26 (10) unknown key on an input, a produce mapping, and a judge entry ea
   );
 });
 
-test('§26 (11) unknown key on a calls: step and on an include: directive each throw DefError, without crossing into the other shape', () => {
+test('§27 (11) unknown key on a calls: step and on an include: directive each throw DefError, without crossing into the other shape', () => {
   // calls: step — bogus key rejected against RAW_CALLS_KEYS (a smaller shape than a normal step)
   assert.throws(
     () => buildDef({
@@ -1800,7 +1800,39 @@ test('§26 (11) unknown key on a calls: step and on an include: directive each t
   );
 });
 
-test('§26 (12) engine: is scoped per-file — an included/called child with a different (but still supported) engine: does not inherit or conflict with the parent', () => {
+test('§27 (12) unknown-key rejection coexists with §26 group: entries — valid group: is accepted, bogus key on a group: entry is rejected against RAW_GROUP_KEYS (not RAW_PRODUCE_KEYS)', () => {
+  // A valid group: entry alongside plain produces must not be mistaken for
+  // an unknown-key produce mapping.
+  const parsed = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [{
+      name: 'a',
+      consumes: ['x'],
+      produces: ['simple', 'urgent', { group: 'route', mode: 'exactlyOne', of: ['simple', 'urgent'] }],
+    }],
+  });
+  const step = parsed.steps.find((s) => s.name === 'a')!;
+  assert.deepEqual(step.groups, [{ group: 'route', mode: 'exactlyOne', of: ['simple', 'urgent'] }]);
+
+  // A bogus key on a group: entry is rejected against RAW_GROUP_KEYS, naming
+  // the offending key — not silently accepted, and not checked against
+  // RAW_PRODUCE_KEYS (which has no `group`/`mode`/`of` keys at all).
+  assert.throws(
+    () => buildDef({
+      name: 'wf',
+      inputs: [{ name: 'x' }],
+      steps: [{
+        name: 'a',
+        consumes: ['x'],
+        produces: ['simple', 'urgent', { group: 'route', mode: 'exactlyOne', of: ['simple', 'urgent'], bogus: true }],
+      }],
+    }),
+    (e: unknown) => e instanceof DefError && /unknown key 'bogus'/.test((e as Error).message),
+  );
+});
+
+test('§27 (13) engine: is scoped per-file — an included/called child with a different (but still supported) engine: does not inherit or conflict with the parent', () => {
   const dir = mktempDefsDir();
   try {
     writeFileSync(
