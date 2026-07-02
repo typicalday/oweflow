@@ -921,6 +921,8 @@ export class Engine {
    * judge step racing on the *same* still-submitted version — e.g. a reaped
    * order's late reject arriving after its own task was re-claimed by a
    * fresh run. That narrower race predates this fix and is out of scope here.
+   * See `docs/design.md` §24.9 for the full writeup and operator mitigations
+   * (`parallel: 1`, a generous `reapTtl:` on slow judge steps).
    */
   reject(workflow: string, path: string, by: Author, text: string): { outcome: 'rejected' | 'born-rejected'; reason?: string } {
     const def = this.defFor(workflow);
