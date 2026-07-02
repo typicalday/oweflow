@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Engine } from '../src/engine.ts';
+import { DefDriftError, Engine } from '../src/engine.ts';
 import type { Order } from '../src/engine.ts';
 import { openStore } from '../src/store.ts';
 import type { Store } from '../src/store.ts';
@@ -1047,4 +1047,177 @@ test('createInstance with producedBy persists parent coordinates and is readable
   assert.deepEqual(found.producedBy, { parentWf, parentPath });
 
   store.close();
+});
+
+// ---- §28 instance-to-definition pinning (DefDriftError) ---------------------
+
+/**
+ * Like makeEngine, but the resolver reads from a mutable `Map` the test can
+ * swap defs in/out of after instance creation — needed to simulate "the def
+ * on disk changed underneath an in-flight instance" without touching disk.
+ */
+function makeMutableEngine(initial: WorkflowDef[]): {
+  engine: Engine;
+  store: Store;
+  defs: Map<string, WorkflowDef>;
+} {
+  const store = openStore(':memory:');
+  const defs = new Map(initial.map((d) => [d.name, d]));
+  const engine = new Engine(store, (name) => {
+    const d = defs.get(name);
+    if (!d) throw new Error(`no def: ${name}`);
+    return d;
+  });
+  return { engine, store, defs };
+}
+
+const deliveryV1 = def(
+  'delivery',
+  [input('proposal')],
+  [
+    step({ name: 'planner', consumes: ['proposal'], produces: ['plan'] }),
+    step({ name: 'builder', consumes: ['plan'], produces: ['pr'], terminal: true }),
+  ],
+);
+
+// v2: same name, a step's body differs — enough to change defHash without
+// touching the wiring (consumes/produces), so the instance stays otherwise
+// tick-compatible; the point is any content change is refused, not just a
+// wiring-breaking one.
+const deliveryV2 = def(
+  'delivery',
+  [input('proposal')],
+  [
+    step({ name: 'planner', consumes: ['proposal'], produces: ['plan'], body: 'plan it differently now' }),
+    step({ name: 'builder', consumes: ['plan'], produces: ['pr'], terminal: true }),
+  ],
+);
+
+test('§28 baseline: instance created against v1, unchanged — tick/status/green all continue normally', () => {
+  const { engine } = makeMutableEngine([deliveryV1]);
+  const wf = engine.createInstance('delivery', { provide: { proposal: { goal: 'ship it' } } });
+
+  const o = fire(engine, wf, 'planner', 1000);
+  engine.green(wf, o.run, 'plan', { plan: 'v1' });
+  engine.close(wf, o.run);
+
+  const s = engine.status(wf);
+  assert.equal(typeof s.done, 'boolean');
+
+  const o2 = fire(engine, wf, 'builder', 2000);
+  engine.green(wf, o2.run, 'pr', { pr: 1 }, { terminal: true });
+  engine.close(wf, o2.run);
+
+  assert.equal(engine.status(wf).done, true);
+});
+
+test('§28 drift across multiple verbs: tick/status/green against a v1 instance each throw DefDriftError once the def moves to v2', () => {
+  const { engine, defs } = makeMutableEngine([deliveryV1]);
+  const wf = engine.createInstance('delivery', { provide: { proposal: { goal: 'ship it' } } });
+
+  // Mutate the def underneath the instance (defs is what the resolver reads).
+  defs.set('delivery', deliveryV2);
+
+  assert.throws(
+    () => engine.tick(wf, { now: 1000 }),
+    (e: unknown) => {
+      assert.ok(e instanceof DefDriftError, `expected DefDriftError, got ${e}`);
+      assert.match((e as Error).message, new RegExp(wf));
+      assert.match((e as Error).message, /hash [0-9a-f]{16}/);
+      return true;
+    },
+  );
+
+  assert.throws(
+    () => engine.status(wf),
+    (e: unknown) => e instanceof DefDriftError,
+  );
+
+  assert.throws(
+    () => engine.green(wf, 'nonexistent-run', 'plan', { plan: 'x' }),
+    (e: unknown) => e instanceof DefDriftError,
+  );
+});
+
+test('§28 a new instance created against v2 (after the mutation) ticks/advances normally — instance-scoped, not a global def-name lockout', () => {
+  const { engine, defs } = makeMutableEngine([deliveryV1]);
+  const wfOld = engine.createInstance('delivery', { provide: { proposal: { goal: 'ship it' } } });
+
+  defs.set('delivery', deliveryV2);
+
+  // The old instance is stuck...
+  assert.throws(() => engine.tick(wfOld, { now: 1000 }), DefDriftError);
+
+  // ...but a brand-new instance created against the CURRENT (v2) def is fine.
+  const wfNew = engine.createInstance('delivery', { provide: { proposal: { goal: 'ship it v2' } } });
+  const o = fire(engine, wfNew, 'planner', 1000);
+  engine.green(wfNew, o.run, 'plan', { plan: 'v2' });
+  engine.close(wfNew, o.run);
+  const o2 = fire(engine, wfNew, 'builder', 2000);
+  engine.green(wfNew, o2.run, 'pr', { pr: 1 }, { terminal: true });
+  engine.close(wfNew, o2.run);
+  assert.equal(engine.status(wfNew).done, true);
+});
+
+// calls: hierarchy drift fixtures — a parent that spawns a child via calls:.
+const driftChildV1: WorkflowDef = {
+  ...def(
+    'driftChild',
+    [input('data', { seedOwed: true })],
+    [step({ name: 'worker', consumes: ['data'], produces: ['result'] })],
+  ),
+  outputs: ['result'],
+};
+
+const driftChildV2: WorkflowDef = {
+  ...def(
+    'driftChild',
+    [input('data', { seedOwed: true })],
+    [step({ name: 'worker', consumes: ['data'], produces: ['result'], body: 'do it differently' })],
+  ),
+  outputs: ['result'],
+};
+
+const driftDeliverStep: StepDef = {
+  ...step({ name: 'deliver', produces: ['delivered'] }),
+  calls: 'driftChild',
+  callsInputs: { data: 'sandbox' },
+  consumes: [],
+};
+
+const driftParentDef: WorkflowDef = def(
+  'driftParent',
+  [input('proposal', { seedOwed: true })],
+  [
+    step({ name: 'provision', consumes: ['proposal'], produces: ['sandbox'] }),
+    driftDeliverStep,
+    step({ name: 'teardown', consumes: ['delivered'], produces: ['done'], terminal: true }),
+  ],
+);
+
+test('§28 calls: hierarchy drift: ticking the parent surfaces DefDriftError for a drifted child (proves the two resolveDef bypasses are closed)', () => {
+  const { engine, store, defs } = makeMutableEngine([driftParentDef, driftChildV1]);
+  const parentWf = engine.createInstance('driftParent', { provide: { proposal: {} } });
+
+  // Advance provision so the calls: gate (sandbox) is ready and maintainCalls spawns the child.
+  const provisionOrder = fire(engine, parentWf, 'provision', 1000);
+  engine.green(parentWf, provisionOrder.run, 'sandbox', { path: '/tmp/x' });
+  engine.close(parentWf, provisionOrder.run);
+
+  // This tick's maintainCalls call spawns driftChild (existingChild did not exist yet).
+  engine.tick(parentWf, { now: 1100 });
+
+  const child = store.findChildByParent(parentWf, 'delivered');
+  assert.ok(child, 'expected the calls: step to have spawned a child instance');
+
+  // Drift the child def underneath the now-existing child instance.
+  defs.set('driftChild', driftChildV2);
+
+  // Ticking the PARENT must surface the CHILD's drift (maintainCalls' existingChild.def
+  // bypass, now routed through defFor, is what makes this throw instead of silently
+  // reading the drifted child def).
+  assert.throws(
+    () => engine.tick(parentWf, { now: 1200 }),
+    (e: unknown) => e instanceof DefDriftError,
+  );
 });

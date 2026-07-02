@@ -418,6 +418,38 @@ test('insertWorkflow without producedBy has producedBy undefined', () => {
   s.close();
 });
 
+// ---- §28: instance-to-definition pinning — def_hash round-trip ---------------
+
+test('insertWorkflow with defHash persists it; getWorkflow/listWorkflows round-trip it back unchanged', () => {
+  const s = mem();
+  const id = randId('wf');
+  s.insertWorkflow(id, { def: 'delivery', defHash: 'abc123deadbeef00' });
+  const got = s.getWorkflow(id);
+  assert.ok(got !== undefined, 'workflow must be retrievable');
+  assert.equal(got.defHash, 'abc123deadbeef00');
+
+  const listed = s.listWorkflows().find((w) => w.id === id);
+  assert.ok(listed !== undefined, 'workflow must appear in listWorkflows');
+  assert.equal(listed.defHash, 'abc123deadbeef00');
+  s.close();
+});
+
+test('a workflow row inserted without defHash round-trips as defHash: undefined (not null/empty-string)', () => {
+  const s = mem();
+  const id = randId('wf');
+  s.insertWorkflow(id, { def: 'delivery' });
+  const got = s.getWorkflow(id);
+  assert.ok(got !== undefined, 'workflow must be retrievable');
+  assert.equal(got.defHash, undefined);
+  assert.notEqual(got.defHash, null);
+  assert.notEqual(got.defHash, '');
+
+  const listed = s.listWorkflows().find((w) => w.id === id);
+  assert.ok(listed !== undefined, 'workflow must appear in listWorkflows');
+  assert.equal(listed.defHash, undefined);
+  s.close();
+});
+
 test('findChildByParent returns the child workflow row', () => {
   const s = mem();
   const parentWf = randId('wf');

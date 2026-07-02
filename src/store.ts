@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS workflow (
   def         TEXT NOT NULL,
   title       TEXT,
   params      TEXT NOT NULL DEFAULT '{}',
+  def_hash    TEXT,
   created_at  INTEGER NOT NULL
 );
 
@@ -286,6 +287,7 @@ interface WorkflowRowRaw {
   def: string;
   title: string | null;
   params: string;
+  def_hash: string | null;
   produced_by_wf: string | null;
   produced_by_path: string | null;
   created_at: number;
@@ -299,6 +301,7 @@ function mapWorkflow(r: WorkflowRowRaw): WorkflowRow {
     createdAt: r.created_at,
   };
   if (r.title !== null) out.title = r.title;
+  if (r.def_hash !== null) out.defHash = r.def_hash;
   if (r.produced_by_wf !== null && r.produced_by_path !== null) {
     out.producedBy = { parentWf: r.produced_by_wf, parentPath: r.produced_by_path };
   }
@@ -406,6 +409,13 @@ export class Store {
     if (!artifactCols.some((c) => c.name === 'approvals')) {
       this.db.exec(`ALTER TABLE artifact ADD COLUMN approvals TEXT`);
     }
+    // §28: instance-to-definition pinning — the content hash of the
+    // WorkflowDef this instance was created against. Additive/nullable, so
+    // pre-feature rows round-trip as `defHash: undefined`, not retroactively
+    // pinned.
+    if (!wfCols.some((c) => c.name === 'def_hash')) {
+      this.db.exec(`ALTER TABLE workflow ADD COLUMN def_hash TEXT`);
+    }
   }
 
   /**
@@ -446,12 +456,13 @@ export class Store {
   insertWorkflow(id: string, data: WorkflowData, producedBy?: { parentWf: string; parentPath: string }): WorkflowRow {
     const at = nowMs();
     this.db
-      .prepare('INSERT INTO workflow (id, def, title, params, produced_by_wf, produced_by_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .prepare('INSERT INTO workflow (id, def, title, params, def_hash, produced_by_wf, produced_by_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(
         id,
         data.def,
         data.title ?? null,
         JSON.stringify(data.params ?? {}),
+        data.defHash ?? null,
         producedBy?.parentWf ?? null,
         producedBy?.parentPath ?? null,
         at,

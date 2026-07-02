@@ -230,6 +230,18 @@ producer resubmitted, or a human bypassed it) and the CAS guard refuses it. The 
 JSON is always written to stdout; the human-readable reason goes to stderr. A successful
 call exits 0 — a worker should treat a non-zero exit as a failure, not a success.
 
+**Editing a workflow's YAML while instances are in-flight is refused.** Every
+instance is stamped at creation time with a content hash of the definition it
+was created against; `tick`/`status`/`green`/etc. against an existing instance
+recompute that hash and refuse (non-zero exit, `DefDriftError`) if the
+on-disk definition has changed underneath it — an edited `include:`-d child
+def counts too. The remedy is one of: revert the definition to the version
+the instance was created against, or `delete` the instance and recreate it
+against the new definition; there's no override. A brand-new instance created
+after the edit is unaffected — the refusal is per-instance, not a lockout on
+the def name. See [`docs/design.md` §28](docs/design.md) for the full
+mechanism.
+
 ### What a job looks like
 
 `tick` returns `{ workflow, orders, reaped }`. Each order is self-contained — a worker

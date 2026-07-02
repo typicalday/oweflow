@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { parseProduce } from '../src/paths.ts';
+import { parse as parseYamlText } from 'yaml';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildDef, DefError, lintDef, loadDefFile, loadDefs, parseDef, validateDef } from '../src/defs.ts';
+import { buildDef, defHash, DefError, lintDef, loadDefFile, loadDefs, parseDef, validateDef } from '../src/defs.ts';
 import { def, input, step } from './helpers.ts';
 
 const delivery = {
@@ -1862,3 +1863,159 @@ test('§27 (13) engine: is scoped per-file — an included/called child with a d
 function mktempDefsDir(): string {
   return mkdtempSync(join(tmpdir(), 'owenloop-defs-engine-'));
 }
+
+// ---- §28 defHash (instance-to-definition pinning) ----------------------------
+
+const deliveryYaml = [
+  'name: delivery',
+  'inputs:',
+  '  - name: proposal',
+  'steps:',
+  '  - name: planner',
+  '    consumes: [proposal]',
+  '    produces: [plan]',
+  '    body: plan it',
+  '  - name: builder',
+  '    consumes: [plan]',
+  '    produces: [pr]',
+].join('\n');
+
+test('§28 defHash is stable across two independent parseDef calls on identical YAML', () => {
+  const a = parseDef(parseYamlText(deliveryYaml));
+  const b = parseDef(parseYamlText(deliveryYaml));
+  assert.equal(defHash(a), defHash(b));
+});
+
+test('§28 defHash differs when a step\'s body: changes', () => {
+  const a = parseDef(parseYamlText(deliveryYaml));
+  const changed = deliveryYaml.replace('plan it', 'plan it differently');
+  const b = parseDef(parseYamlText(changed));
+  assert.notEqual(defHash(a), defHash(b));
+});
+
+test('§28 defHash differs when a step is added', () => {
+  const a = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [{ name: 'a', consumes: ['x'], produces: ['y'] }],
+  });
+  const b = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [
+      { name: 'a', consumes: ['x'], produces: ['y'] },
+      { name: 'b', consumes: ['y'], produces: ['z'], terminal: true },
+    ],
+  });
+  assert.notEqual(defHash(a), defHash(b));
+});
+
+test('§28 defHash differs when a step is removed', () => {
+  const a = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [
+      { name: 'a', consumes: ['x'], produces: ['y'] },
+      { name: 'b', consumes: ['y'], produces: ['z'], terminal: true },
+    ],
+  });
+  const b = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [{ name: 'a', consumes: ['x'], produces: ['y'], terminal: true }],
+  });
+  assert.notEqual(defHash(a), defHash(b));
+});
+
+test('§28 defHash differs when consumes/produces array order changes (order IS semantic)', () => {
+  const a = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }, { name: 'y' }],
+    steps: [{ name: 'a', consumes: ['x', 'y'], produces: ['p', 'q'] }],
+  });
+  const b = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }, { name: 'y' }],
+    steps: [{ name: 'a', consumes: ['y', 'x'], produces: ['q', 'p'] }],
+  });
+  assert.notEqual(defHash(a), defHash(b));
+});
+
+test('§28 defHash differs when engine: differs', () => {
+  const base = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [{ name: 'a', consumes: ['x'], produces: ['y'] }],
+  });
+  const withDifferentEngine = { ...base, engine: base.engine + 1 };
+  // engine's max is SUPPORTED_ENGINE_VERSION (currently 1), so we can't legally
+  // parseDef a def declaring engine: 2 yet — construct the WorkflowDef objects
+  // directly (defHash takes a WorkflowDef, not raw YAML) to isolate this field.
+  assert.notEqual(defHash(base), defHash(withDifferentEngine));
+});
+
+test('§28 defHash is IDENTICAL when only top-level key-insertion order differs', () => {
+  const reordered = [
+    'inputs:',
+    '  - name: proposal',
+    'name: delivery',
+    'steps:',
+    '  - name: planner',
+    '    consumes: [proposal]',
+    '    produces: [plan]',
+    '    body: plan it',
+    '  - name: builder',
+    '    consumes: [plan]',
+    '    produces: [pr]',
+  ].join('\n');
+  const a = parseDef(parseYamlText(deliveryYaml));
+  const b = parseDef(parseYamlText(reordered));
+  assert.equal(defHash(a), defHash(b));
+});
+
+test('§28 defHash ignores dir (loader metadata, not def content)', () => {
+  const a = parseDef({
+    name: 'wf',
+    inputs: [{ name: 'x' }],
+    steps: [{ name: 'a', consumes: ['x'], produces: ['y'] }],
+  });
+  const withDir = { ...a, dir: '/some/path/wf.yaml' };
+  const withOtherDir = { ...a, dir: '/other/path/wf.yaml' };
+  assert.equal(defHash(a), defHash(withDir));
+  assert.equal(defHash(withDir), defHash(withOtherDir));
+});
+
+test('§28 defHash on an expanded (include:-using) def changes when the included child\'s body changes, even though parent YAML is untouched', () => {
+  const dir = mktempDefsDir();
+  try {
+    const childV1 = [
+      'name: child',
+      'inputs:',
+      '  - name: x',
+      'steps:',
+      '  - name: a',
+      '    consumes: [x]',
+      '    produces: [y]',
+      '    body: v1 body',
+    ].join('\n');
+    const childV2 = childV1.replace('v1 body', 'v2 body');
+    const parentYaml = [
+      'name: parent',
+      'steps:',
+      '  - include: child',
+      '    as: kid',
+    ].join('\n');
+    writeFileSync(join(dir, 'child.yaml'), childV1);
+    writeFileSync(join(dir, 'parent.yaml'), parentYaml);
+    const v1 = loadDefs(dir);
+    const parentV1 = v1.get('parent')!;
+
+    writeFileSync(join(dir, 'child.yaml'), childV2);
+    const v2 = loadDefs(dir);
+    const parentV2 = v2.get('parent')!;
+
+    assert.notEqual(defHash(parentV1), defHash(parentV2));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

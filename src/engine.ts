@@ -10,6 +10,7 @@
  * born-rejects the output instead of greening it.
  */
 
+import { defHash } from './defs.ts';
 import {
   elementPath,
   parseElement,
@@ -149,6 +150,17 @@ export interface CreateOpts {
 export type DefResolver = (defName: string) => WorkflowDef;
 
 /**
+ * Thrown by `defFor` when a workflow instance's stamped def hash no longer
+ * matches the current definition's hash — the def was edited underneath an
+ * in-flight instance. Mirrors StoreVersionError's discipline (refuse
+ * silently-incompatible state) applied per-instance to defs instead of
+ * per-database to schema. The instance is stuck, not corrupted: reverting
+ * the def back to its original shape, or deleting/recreating the instance,
+ * both recover it. There is no "force" escape hatch by design.
+ */
+export class DefDriftError extends Error {}
+
+/**
  * A push notification of a committed engine change, delivered to observers
  * registered via {@link Engine.subscribe}. Lets an in-process host react the
  * instant the graph advances instead of polling `tick`/`status`.
@@ -223,9 +235,13 @@ export class Engine {
   /** Start a workflow instance: persist it, seed its declared inputs, settle. */
   createInstance(defName: string, opts: CreateOpts = {}): string {
     const def = this.resolveDef(defName);
+    const hash = defHash(def);
     const id = randId('wf');
     this.store.tx(() => {
-      const wfData: { def: string; title?: string; params?: Record<string, string> } = { def: defName };
+      const wfData: { def: string; title?: string; params?: Record<string, string>; defHash: string } = {
+        def: defName,
+        defHash: hash,
+      };
       if (opts.title !== undefined) wfData.title = opts.title;
       if (opts.params !== undefined) wfData.params = opts.params;
       this.store.insertWorkflow(id, wfData, opts.producedBy);
@@ -337,8 +353,10 @@ export class Engine {
 
         if (!existingChild) continue; // defensive: createInstance returned but getWorkflow failed
 
-        // STEP 4 — Read child's declared outcome artifact.
-        const childDef = this.resolveDef(existingChild.def);
+        // STEP 4 — Read child's declared outcome artifact. Routed through
+        // defFor (§28) so a def edited underneath the child instance surfaces
+        // DefDriftError here instead of silently reading the drifted def.
+        const childDef = this.defFor(existingChild.id);
         const childOutcomeStem = childDef.outputs![0]!; // validated by Phase-2 check
         let childArts = this.artMap(existingChild.id);
         let childOutcomeArt = childArts.get(childOutcomeStem);
@@ -423,7 +441,9 @@ export class Engine {
     if (this._inMaintainCalls.has(parentWf)) return;
     const parentWfRow = this.store.getWorkflow(parentWf);
     if (!parentWfRow) return;
-    const parentDef = this.resolveDef(parentWfRow.def);
+    // Routed through defFor (§28) so parent-side drift surfaces here too,
+    // instead of silently reading the parent's drifted def.
+    const parentDef = this.defFor(parentWf);
     this.maintainCalls(parentWf, parentDef);
     this.fireSettled(parentWf);
   }
@@ -1545,10 +1565,33 @@ export class Engine {
     return m;
   }
 
+  /**
+   * Resolve the current definition for a workflow instance, refusing to
+   * proceed if the def has drifted since the instance was created (§28
+   * instance-to-definition pinning). The single chokepoint every verb
+   * (tick/status/green/emit/seal/reject/retract/skip/retry/provideInput) and
+   * the calls: maintenance bypasses route through, so drift can't be
+   * silently worked around from any of those paths.
+   */
   private defFor(workflow: string): WorkflowDef {
     const wf = this.store.getWorkflow(workflow);
     if (!wf) throw new Error(`no such workflow instance: ${workflow}`);
-    return this.resolveDef(wf.def);
+    const def = this.resolveDef(wf.def);
+    if (wf.defHash !== undefined) {
+      const currentHash = defHash(def);
+      if (currentHash !== wf.defHash) {
+        throw new DefDriftError(
+          `workflow ${workflow} was created against definition '${wf.def}' ` +
+          `(hash ${wf.defHash}), but the current definition's hash is ` +
+          `${currentHash}. The definition changed underneath this in-flight ` +
+          `instance — refusing to advance it against a different shape. ` +
+          `Revert '${wf.def}' to the version this instance was created ` +
+          `against, or delete this instance (owenloop delete ${workflow}) ` +
+          `and recreate it against the new definition.`,
+        );
+      }
+    }
+    return def;
   }
 
   private step(def: WorkflowDef, name: string): StepDef {

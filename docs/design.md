@@ -985,3 +985,100 @@ routing itself (which allowlist an entry is checked against) is decided by
 check in `buildStep` — exactly the same discriminator logic already used to
 dispatch parsing — so the unknown-key check can never accidentally validate
 an entry against the wrong shape's allowlist.
+
+## §28 Instance-to-definition pinning
+
+Defs are read fresh from disk on (almost) every CLI invocation — `openCtx()`
+calls `loadDefs`, so an edited YAML file is live on the very next
+`tick`/`status`/etc. call. Before this feature, that meant an author editing
+a workflow definition while an instance was mid-flight against the old shape
+would silently have that instance start advancing against different wiring —
+consumed stems that no longer mean what they meant at claim time, steps
+renamed or removed out from under an open run, schemas tightened or loosened
+mid-flight. This mirrors the precedent set by `StoreVersionError` (`store.ts`
+§schema-version guard, PR #48): refuse to silently proceed against
+incompatible state, applied here per-instance to definitions instead of
+per-database to schema.
+
+### §28.1 What gets hashed, and when
+
+`defHash(def: WorkflowDef): string` (defs.ts) computes a `sha256`, truncated
+to 16 hex characters, of the fully-expanded, fully-validated `WorkflowDef` —
+the same object `resolveDef`/`defFor` return, *after* `expandIncludes` and
+`validateDef`. Every field is included except `dir` (loader metadata, not
+def content — two identical defs loaded from different paths hash the same)
+and `_includes` (already consumed by `expandIncludes` on a resolved def;
+stripped defensively). `engine:` is included with no special-casing — it's
+just one more field on the resolved def.
+
+Hashing the *expanded* def means editing an `include:`-d child def also
+invalidates every parent that includes it, even though the parent's own
+YAML file is untouched — the parent's effective wiring changed, so its hash
+changes too.
+
+A private `stableStringify` helper recursively sorts object keys before
+`JSON.stringify`-ing, so the hash is independent of field-insertion order in
+the source YAML. Arrays are deliberately left in their original order —
+order is semantic for `steps`/`consumes`/`produces` (e.g. two `produces:`
+entries reordered is a different — if equivalent-looking — definition), so
+sorting them would hide a real content change.
+
+`Engine.createInstance` computes `defHash(def)` immediately after resolving
+the definition, and stamps it onto the new workflow row (`WorkflowData.defHash`
+→ `store.ts`'s nullable `workflow.def_hash TEXT` column, an additive migration
+like the `produced_by_wf`/`approvals`/`alarm_at` columns before it — no
+`SCHEMA_VERSION` bump).
+
+### §28.2 The refusal: `defFor` and `DefDriftError`
+
+`private defFor(workflow): WorkflowDef` is the single chokepoint every
+verb that operates on an existing instance resolves its definition through —
+`tick`, `status`, `green`, `emit`, `seal`, `reject`, `retract`, `skip`,
+`retry`, and `provideInput`. It now compares the instance's stamped
+`defHash` against the current definition's hash (recomputed on every call —
+cheap, and correct if the def changes between calls) and throws
+`DefDriftError` on a mismatch:
+
+```
+workflow <id> was created against definition '<name>' (hash <old>), but the
+current definition's hash is <new>. The definition changed underneath this
+in-flight instance — refusing to advance it against a different shape.
+Revert '<name>' to the version this instance was created against, or delete
+this instance (owenloop delete <id>) and recreate it against the new
+definition.
+```
+
+`DefDriftError` has no force/override escape hatch, by design — same as
+`StoreVersionError`. The instance is stuck, not corrupted: reverting the def
+back, or deleting/recreating the instance, both recover it.
+
+Two internal call sites previously bypassed `defFor` and called
+`resolveDef` directly, both inside the `calls:` (§23) machinery: the
+existing-child lookup in `maintainCalls` (re-attaching to an
+already-spawned child instance) and the parent-lookup in
+`triggerParentIfChild` (cascading a child's progress up to its parent).
+Both now route through `defFor`, so a def edited underneath either side of
+a `calls:` parent/child pair surfaces `DefDriftError` instead of silently
+reading the drifted def — ticking a parent whose called child has drifted
+throws, even though the parent's own definition is untouched.
+
+`close` and `heartbeat` do not call `defFor` and are correctly unguarded —
+neither reads step wiring. `show` and `trace` (CLI) read raw artifacts /
+build a trace directly from a separately-loaded def map, not through the
+engine's `defFor`, so they keep working and reporting accurate state even
+while an instance is stuck in drift.
+
+### §28.3 Non-goals
+
+Pre-feature instances — created before this change shipped, with no stamped
+`def_hash` — are **not** retroactively pinned. `defFor`'s guard only runs
+`wf.defHash !== undefined`; a `null`/absent hash is lenient (old data keeps
+working exactly as before), while a present hash is strictly enforced. This
+mirrors `StoreVersionError`'s asymmetry: refuse to run somewhere clearly
+incompatible, without inventing history for data that predates the check.
+
+Drift detection is per-*instance*, not per-def-*name*: editing `delivery.yaml`
+only affects instances stamped with its old hash. A brand-new instance
+created against the current (edited) definition hashes and ticks normally —
+there is no global lockout on the def name while any one instance holds a
+stale hash.

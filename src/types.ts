@@ -135,6 +135,11 @@ export interface WorkflowData {
   def: string; // definition name
   title?: string;
   params?: Record<string, string>;
+  /** Content hash (defs.ts `defHash`) of the fully-expanded WorkflowDef this
+   *  instance was created against (design §28 instance-to-definition pinning).
+   *  Absent on instances created before this feature shipped — those are not
+   *  retroactively pinned. */
+  defHash?: string;
 }
 
 // ---- workflow definitions ----------------------------------------------------

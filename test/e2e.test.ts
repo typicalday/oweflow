@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -296,4 +296,122 @@ test('list and defs reflect created instances', () => {
   assert.deepEqual(ow('list'), []);
 
   rmSync(join(db, '..'), { recursive: true, force: true });
+});
+
+// ---- §28 instance-to-definition pinning (DefDriftError), end-to-end --------
+
+const DELIVERY_V1 = [
+  'name: delivery',
+  'inputs:',
+  '  - name: proposal',
+  '    seedOwed: true',
+  'steps:',
+  '  - name: planner',
+  '    consumes: [proposal]',
+  '    produces: [plan]',
+  '    body: plan it',
+  '  - name: builder',
+  '    consumes: [plan]',
+  '    produces: [pr]',
+  '    terminal: true',
+].join('\n');
+
+// v2 differs only in a step's body — enough to change the on-disk def's
+// content hash without breaking the wiring (consumes/produces unchanged).
+const DELIVERY_V2 = DELIVERY_V1.replace('plan it', 'plan it a totally different way');
+
+function tmpDefsDir(): string {
+  return mkdtempSync(join(tmpdir(), 'owenloop-e2e-defs-'));
+}
+
+/** Like `raw`/`makeCli` above, but against a caller-supplied --defs dir
+ *  instead of the shipped examples (needed to edit the YAML mid-test). */
+function rawWithDefs(db: string, defsDir: string, args: string[]): RawResult {
+  const res = spawnSync(process.execPath, [BIN, ...args, '--db', db, '--defs', defsDir], {
+    encoding: 'utf8',
+  });
+  return { status: res.status ?? -1, stdout: res.stdout, stderr: res.stderr };
+}
+
+function makeCliWithDefs(db: string, defsDir: string) {
+  return (...args: string[]): any => {
+    const r = rawWithDefs(db, defsDir, args);
+    if (r.status !== 0) {
+      throw new Error(`owenloop ${args.join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
+    }
+    const out = r.stdout.trim();
+    return out ? JSON.parse(out) : null;
+  };
+}
+
+test('§28 editing a workflow YAML while an instance is in-flight is refused: tick fails non-zero with a DefDriftError-shaped message, no order emitted, no artifact mutated', () => {
+  const db = tmpDb();
+  const defsDir = tmpDefsDir();
+  try {
+    writeFileSync(join(defsDir, 'delivery.yaml'), DELIVERY_V1);
+    const ow = makeCliWithDefs(db, defsDir);
+
+    const wf = ow('create', 'delivery', '--provide', `proposal=${JSON.stringify({ text: 'x' })}`).workflow;
+    let t = ow('tick', wf);
+    let o = orderFor(t, 'planner');
+    assert.equal(ow('green', wf, o.run, 'plan', '--value', JSON.stringify({ plan: 'v1' })).outcome, 'green');
+    ow('close', wf, o.run);
+
+    // Snapshot artifacts before the edit, to prove drift refusal mutates nothing.
+    const artifactsBefore = ow('show', wf);
+
+    // Edit the def on disk underneath the in-flight instance.
+    writeFileSync(join(defsDir, 'delivery.yaml'), DELIVERY_V2);
+
+    const r = rawWithDefs(db, defsDir, ['tick', wf]);
+    assert.notEqual(r.status, 0, 'tick against a drifted def must exit non-zero');
+    assert.match(r.stderr, /error:/);
+    assert.match(r.stderr, new RegExp(wf));
+    assert.match(r.stderr, /definition changed underneath this in-flight instance/);
+
+    // `show` reads raw artifacts directly (no defFor/engine call), so it must
+    // still work during drift and must show nothing changed.
+    const artifactsAfter = ow('show', wf);
+    assert.deepEqual(artifactsAfter, artifactsBefore, 'no artifact mutated by the failed tick');
+  } finally {
+    rmSync(join(db, '..'), { recursive: true, force: true });
+    rmSync(defsDir, { recursive: true, force: true });
+  }
+});
+
+test('§28 a fresh instance of the same def name created after the edit ticks/advances normally end-to-end', () => {
+  const db = tmpDb();
+  const defsDir = tmpDefsDir();
+  try {
+    writeFileSync(join(defsDir, 'delivery.yaml'), DELIVERY_V1);
+    const ow = makeCliWithDefs(db, defsDir);
+
+    const oldWf = ow('create', 'delivery', '--provide', `proposal=${JSON.stringify({ text: 'x' })}`).workflow;
+    let o = orderFor(ow('tick', oldWf), 'planner');
+    ow('green', oldWf, o.run, 'plan', '--value', JSON.stringify({ plan: 'v1' }));
+    ow('close', oldWf, o.run);
+
+    writeFileSync(join(defsDir, 'delivery.yaml'), DELIVERY_V2);
+
+    // The old instance is stuck.
+    const stuck = rawWithDefs(db, defsDir, ['tick', oldWf]);
+    assert.notEqual(stuck.status, 0);
+
+    // A brand-new instance of the same def NAME, created after the edit, is
+    // created against (and hashed against) the CURRENT v2 content — it ticks
+    // and advances to done normally, proving the refusal is instance-scoped.
+    const newWf = ow('create', 'delivery', '--provide', `proposal=${JSON.stringify({ text: 'y' })}`).workflow;
+    o = orderFor(ow('tick', newWf), 'planner');
+    ow('green', newWf, o.run, 'plan', '--value', JSON.stringify({ plan: 'v2' }));
+    ow('close', newWf, o.run);
+
+    o = orderFor(ow('tick', newWf), 'builder');
+    ow('green', newWf, o.run, 'pr', '--value', JSON.stringify({ pr: 1 }));
+    ow('close', newWf, o.run);
+
+    assert.equal(ow('status', newWf).done, true);
+  } finally {
+    rmSync(join(db, '..'), { recursive: true, force: true });
+    rmSync(defsDir, { recursive: true, force: true });
+  }
 });

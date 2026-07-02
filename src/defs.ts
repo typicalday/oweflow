@@ -20,6 +20,7 @@
  *         Draft a plan for ${WORKFLOW}.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -765,6 +766,30 @@ export function parseDef(raw: unknown, source?: string, baseDir?: string): Workf
     );
   }
   return def;
+}
+
+/** Recursively sort object keys so JSON.stringify is independent of
+ *  field-insertion order; arrays are left as-is (order is semantic there,
+ *  e.g. steps/consumes/produces). */
+function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const keys = Object.keys(v as Record<string, unknown>).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify((v as Record<string, unknown>)[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+
+/**
+ * A stable content hash of a fully-expanded WorkflowDef (design §28-pin).
+ * Excludes `dir` (loader metadata, not def content) and `_includes` (already
+ * consumed by expandIncludes on a resolved def; stripped here defensively).
+ * Deterministic across process restarts.
+ */
+export function defHash(def: WorkflowDef): string {
+  const { dir: _dir, _includes: _inc, ...rest } = def;
+  const h = createHash('sha256').update(stableStringify(rest)).digest('hex');
+  return h.slice(0, 16);
 }
 
 /**

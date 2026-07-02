@@ -30,7 +30,7 @@
 
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Engine } from './engine.ts';
+import { DefDriftError, Engine } from './engine.ts';
 import { buildGraph, buildTrace, graphToDot, graphToMermaid, modelCheck } from './model.ts';
 import { openStore } from './store.ts';
 import type { ArtifactRow, Store, WorkflowRow } from './store.ts';
@@ -679,7 +679,7 @@ export function main(argv: string[], io: CliIO = defaultIO()): number {
   try {
     return dispatch(command, io, args);
   } catch (e) {
-    if (e instanceof CliError || e instanceof DefError) {
+    if (e instanceof CliError || e instanceof DefError || e instanceof DefDriftError) {
       io.err(`error: ${e.message}`);
     } else {
       io.err(`error: ${(e as Error).message}`);
